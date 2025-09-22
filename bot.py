@@ -22,10 +22,24 @@ logger = logging.getLogger(__name__)
 # FastAPI app for Railway health checks
 app = FastAPI()
 
+# Global status tracking
+bot_status = {
+    "database": "disconnected",
+    "kalshi": "disconnected", 
+    "telegram": "disconnected",
+    "started_at": datetime.now().isoformat()
+}
+
 @app.get("/")
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "kalshi_bot", "timestamp": datetime.now().isoformat()}
+    # Always return 200 OK for Railway health check
+    return {
+        "status": "healthy", 
+        "service": "kalshi_bot",
+        "timestamp": datetime.now().isoformat(),
+        "components": bot_status
+    }
 
 class DatabaseManager:
     def __init__(self, database_url: str):
@@ -53,6 +67,8 @@ class DatabaseManager:
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"Database connection attempt {attempt + 1}/{self.max_retries}")
+                bot_status["database"] = "connecting"
+                
                 self.pool = await asyncpg.create_pool(**connection_kwargs)
                 
                 # Test connection
@@ -60,11 +76,14 @@ class DatabaseManager:
                     await conn.fetchval('SELECT 1')
                 
                 logger.info("Database connected successfully")
+                bot_status["database"] = "connected"
                 await self.create_tables()
                 return
                 
             except Exception as e:
                 logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
+                bot_status["database"] = f"failed: {str(e)[:50]}"
+                
                 if "certificate verify failed" in str(e):
                     logger.error("SSL certificate verification failed")
                 elif "connection refused" in str(e):
@@ -77,6 +96,7 @@ class DatabaseManager:
                     await asyncio.sleep(self.retry_delay)
                 else:
                     logger.error("Max database connection retries exceeded")
+                    bot_status["database"] = "failed_permanently"
                     raise
 
     async def disconnect(self):
@@ -134,14 +154,18 @@ class KalshiBot:
         """Initialize Kalshi client"""
         try:
             logger.info("Initializing Kalshi client...")
+            bot_status["kalshi"] = "connecting"
+            
             self.kalshi_client = KalshiClient(
                 email=self.kalshi_email,
                 password=self.kalshi_password,
                 prod_url="https://trading-api.kalshi.com/trade-api/v2"
             )
             logger.info("Kalshi client initialized successfully")
+            bot_status["kalshi"] = "connected"
         except Exception as e:
             logger.error(f"Failed to initialize Kalshi client: {e}")
+            bot_status["kalshi"] = f"failed: {str(e)[:50]}"
             raise
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,17 +278,22 @@ class KalshiBot:
 
     async def run(self):
         """Main bot runner optimized for Railway"""
+        # Start web server in background thread FIRST
+        web_thread = threading.Thread(target=self.run_web_server, daemon=True)
+        web_thread.start()
+        logger.info("Health check server started")
+        
+        # Give the web server time to start
+        await asyncio.sleep(2)
+        
         try:
-            # Start web server in background thread
-            web_thread = threading.Thread(target=self.run_web_server, daemon=True)
-            web_thread.start()
-            logger.info("Health check server started")
-            
-            # Connect to database
+            # Connect to database with retries
             await self.db.connect()
+            logger.info("Database connected successfully")
             
             # Initialize Kalshi client
             await self.initialize_kalshi()
+            logger.info("Kalshi client initialized")
             
             # Create Telegram application
             self.application = Application.builder().token(self.bot_token).build()
@@ -301,9 +330,28 @@ class KalshiBot:
                 
         except Exception as e:
             logger.error(f"Bot startup error: {e}")
-            raise
+            # Don't re-raise - keep health server running for Railway
+            logger.info("Keeping health server running despite bot error")
+            
+            # Keep the main thread alive even if bot fails
+            while True:
+                await asyncio.sleep(60)
+                logger.info("Bot failed but health server still running")
         finally:
-            await self.cleanup()
+            # Only cleanup bot components, not the web server
+            try:
+                if self.application:
+                    if hasattr(self.application, 'updater') and self.application.updater.running:
+                        await self.application.updater.stop()
+                    if self.application.running:
+                        await self.application.stop()
+                    await self.application.shutdown()
+                        
+                await self.db.disconnect()
+                logger.info("Bot cleanup complete")
+                
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
 
     async def cleanup(self):
         """Clean shutdown"""
