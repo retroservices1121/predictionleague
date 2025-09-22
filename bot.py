@@ -37,9 +37,9 @@ class KalshiClient:
         self.last_auth = None
         
     def _load_private_key(self, key_content):
-    try:
-        if not key_content:
-            return None
+        try:
+            if not key_content:
+                return None
 
         # If it's already bytes, just use it
         if isinstance(key_content, bytes):
