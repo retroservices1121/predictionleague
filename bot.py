@@ -36,30 +36,26 @@ class KalshiClient:
         self.token = None
         self.last_auth = None
         
-    def _load_private_key(self, key_content: str = None):
-        """Load RSA private key from environment or file"""
-        try:
-            if key_content:
-                # Load from environment variable (Railway)
-                private_key = serialization.load_pem_private_key(
-                    base64.b64decode(key_content).encode() if key_content else key_content.encode(),
-                    password=None
-                )
-            else:
-                # Load from file (local development)
-                key_path = os.getenv("PRIVATE_KEY_PATH", "kalshi_private_key.pem")
-                with open(key_path, 'rb') as key_file:
-                    private_key = serialization.load_pem_private_key(
-                        key_file.read(),
-                        password=None
-                    )
-            
-            logger.info("RSA private key loaded successfully")
-            return private_key
-            
-        except Exception as e:
-            logger.error(f"Failed to load private key: {e}")
-            raise
+    def _load_private_key(self, key_content):
+    try:
+        if not key_content:
+            return None
+
+        # If it's already bytes, just use it
+        if isinstance(key_content, bytes):
+            decoded_key = key_content
+        else:
+            # Otherwise treat as base64 string
+            decoded_key = base64.b64decode(key_content)
+
+        return serialization.load_pem_private_key(
+            decoded_key,
+            password=None,
+            backend=default_backend()
+        )
+    except Exception as e:
+        logger.error(f"Failed to load private key: {e}")
+        raise
     
     def _create_signature(self, method: str, path: str, body: str = "") -> str:
         """Create RSA signature for API requests"""
