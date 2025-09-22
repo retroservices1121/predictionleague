@@ -34,29 +34,52 @@ class KalshiClient:
         self.last_auth = None
         
     def _load_private_key(self, key_content: str = None):
-        """Load RSA private key from environment or file"""
+    """Load RSA private key from Kalshi's provided format"""
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    if not key_content:
+        raise ValueError("Private key content is required")
+    
+    logger.info("Loading Kalshi-provided private key...")
+    
+    try:
+        # Kalshi typically provides keys in PEM format
+        # Clean up any extra whitespace but preserve line breaks
+        clean_key = key_content.strip()
+        
+        # Ensure proper line endings
+        if '\\n' in clean_key:
+            # If escaped newlines, convert them
+            clean_key = clean_key.replace('\\n', '\n')
+        
+        # Load the PEM private key directly
+        private_key = serialization.load_pem_private_key(
+            clean_key.encode('utf-8'),
+            password=None
+        )
+        
+        logger.info("Successfully loaded Kalshi private key")
+        return private_key
+        
+    except Exception as e:
+        logger.error(f"Failed to load Kalshi private key: {e}")
+        logger.error(f"Key preview: {key_content[:100]}...")
+        
+        # Try with different line ending formats
         try:
-            if key_content:
-                # Load from environment variable (Railway)
-                private_key = serialization.load_pem_private_key(
-                    base64.b64decode(key_content),
-                    password=None
-                )
-            else:
-                # Load from file (local development)
-                key_path = os.getenv("PRIVATE_KEY_PATH", "kalshi_private_key.pem")
-                with open(key_path, 'rb') as key_file:
-                    private_key = serialization.load_pem_private_key(
-                        key_file.read(),
-                        password=None
-                    )
-            
-            logger.info("RSA private key loaded successfully")
+            # Try with normalized line endings
+            normalized_key = key_content.replace('\\n', '\n').replace('\r\n', '\n').replace('\r', '\n')
+            private_key = serialization.load_pem_private_key(
+                normalized_key.encode('utf-8'),
+                password=None
+            )
+            logger.info("Successfully loaded key with normalized line endings")
             return private_key
-            
-        except Exception as e:
-            logger.error(f"Failed to load private key: {e}")
-            raise
+        except Exception as e2:
+            logger.error(f"Normalized format also failed: {e2}")
+            raise ValueError(f"Unable to load Kalshi private key: {e}")
     
     def _create_signature(self, method: str, path: str, body: str = "") -> str:
         """Create RSA signature for API requests"""
