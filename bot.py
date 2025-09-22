@@ -17,10 +17,7 @@ import re
 # Configure logging for Railway
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(),  # Console output for Railway logs
-    ]
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -36,13 +33,13 @@ class KalshiClient:
         self.token = None
         self.last_auth = None
         
-   def _load_private_key(self, key_content: str = None):
+    def _load_private_key(self, key_content: str = None):
         """Load RSA private key from environment or file"""
         try:
             if key_content:
                 # Load from environment variable (Railway)
                 private_key = serialization.load_pem_private_key(
-                    base64.b64decode(key_content).encode() if key_content else key_content.encode(),
+                    base64.b64decode(key_content),
                     password=None
                 )
             else:
