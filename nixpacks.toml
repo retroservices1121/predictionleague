@@ -1,11 +1,15 @@
 [phases.setup]
-nixPkgs = ["python39", "openssl"]
+nixPkgs = ["python39", "python39Packages.pip", "openssl", "gcc"]
 
 [phases.install]
-cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = [
+    "python3 -m ensurepip --upgrade",
+    "python3 -m pip install --upgrade pip",
+    "python3 -m pip install -r requirements.txt"
+]
 
 [phases.build] 
-cmds = ["python -c 'import asyncpg; print(\"Dependencies verified\")'"]
+cmds = ["python3 -c 'import asyncpg; print(\"Dependencies verified\")'"]
 
 [start]
-cmd = "python bot.py"
+cmd = "python3 bot.py"
