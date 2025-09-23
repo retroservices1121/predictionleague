@@ -45,9 +45,9 @@ class DatabaseManager:
             raise
 
     async def create_tables(self):
-        """Create necessary database tables"""
+        """Create necessary database tables in correct order"""
         async with self.pool.acquire() as conn:
-            # Users table
+            # 1. Users table (no dependencies)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id BIGINT PRIMARY KEY,
@@ -61,7 +61,7 @@ class DatabaseManager:
                 );
             ''')
             
-            # Leagues table
+            # 2. Leagues table (no dependencies)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS leagues (
                     id SERIAL PRIMARY KEY,
@@ -71,17 +71,7 @@ class DatabaseManager:
                 );
             ''')
             
-            # League members table
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS league_members (
-                    league_id INTEGER REFERENCES leagues(id),
-                    user_id BIGINT REFERENCES users(id),
-                    joined_at TIMESTAMP DEFAULT NOW(),
-                    PRIMARY KEY (league_id, user_id)
-                );
-            ''')
-            
-            # Markets table
+            # 3. Markets table (no dependencies)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS markets (
                     id VARCHAR(255) PRIMARY KEY,
@@ -98,13 +88,23 @@ class DatabaseManager:
                 );
             ''')
             
-            # Predictions table
+            # 4. League members table (depends on users and leagues)
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS league_members (
+                    league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    joined_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (league_id, user_id)
+                );
+            ''')
+            
+            # 5. Predictions table (depends on users, markets, leagues)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS predictions (
                     id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id),
-                    market_id VARCHAR(255) REFERENCES markets(id),
-                    league_id INTEGER REFERENCES leagues(id) DEFAULT 1,
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    market_id VARCHAR(255) REFERENCES markets(id) ON DELETE CASCADE,
+                    league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE DEFAULT 1,
                     prediction BOOLEAN NOT NULL,
                     confidence INTEGER DEFAULT 1,
                     points_earned INTEGER DEFAULT 0,
@@ -113,12 +113,12 @@ class DatabaseManager:
                 );
             ''')
 
-            # Weekly scores table
+            # 6. Weekly scores table (depends on users and leagues)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS weekly_scores (
                     id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id),
-                    league_id INTEGER REFERENCES leagues(id),
+                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
                     week_start DATE NOT NULL,
                     score INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT NOW(),
@@ -126,7 +126,7 @@ class DatabaseManager:
                 );
             ''')
 
-            # Create default league if it doesn't exist
+            # 7. Create default league if it doesn't exist
             await conn.execute('''
                 INSERT INTO leagues (id, name) VALUES (1, 'Global League')
                 ON CONFLICT (id) DO NOTHING;
@@ -176,6 +176,8 @@ class DatabaseManager:
                 elif not isinstance(close_time, datetime):
                     close_time = datetime.now() + timedelta(days=7)
 
+                market_id = market.get('ticker', market.get('id', f'DEMO_{abs(hash(market["title"]))%1000000}'))
+
                 await conn.execute('''
                     INSERT INTO markets (id, title, category, close_time, week_start, volume, yes_price, no_price)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -187,7 +189,7 @@ class DatabaseManager:
                         yes_price = EXCLUDED.yes_price,
                         no_price = EXCLUDED.no_price
                 ''', 
-                    market.get('ticker', market.get('id', f'DEMO_{hash(market["title"])}')),
+                    market_id,
                     market['title'],
                     market.get('category', 'General'),
                     close_time,
@@ -200,19 +202,31 @@ class DatabaseManager:
     async def make_prediction(self, user_id: int, market_id: str, league_id: int, prediction: bool):
         """Record a user's prediction"""
         async with self.pool.acquire() as conn:
-            # Insert or update prediction
-            await conn.execute('''
-                INSERT INTO predictions (user_id, market_id, league_id, prediction)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (user_id, market_id, league_id) 
-                DO UPDATE SET prediction = EXCLUDED.prediction, created_at = NOW()
-            ''', user_id, market_id, league_id, prediction)
+            # Check if prediction already exists
+            existing = await conn.fetchrow('''
+                SELECT id FROM predictions 
+                WHERE user_id = $1 AND market_id = $2 AND league_id = $3
+            ''', user_id, market_id, league_id)
             
-            # Update user prediction count
-            await conn.execute('''
-                UPDATE users SET predictions_made = predictions_made + 1 
-                WHERE id = $1
-            ''', user_id)
+            if existing:
+                # Update existing prediction
+                await conn.execute('''
+                    UPDATE predictions 
+                    SET prediction = $4, created_at = NOW()
+                    WHERE user_id = $1 AND market_id = $2 AND league_id = $3
+                ''', user_id, market_id, league_id, prediction)
+            else:
+                # Insert new prediction
+                await conn.execute('''
+                    INSERT INTO predictions (user_id, market_id, league_id, prediction)
+                    VALUES ($1, $2, $3, $4)
+                ''', user_id, market_id, league_id, prediction)
+                
+                # Update user prediction count
+                await conn.execute('''
+                    UPDATE users SET predictions_made = predictions_made + 1 
+                    WHERE id = $1
+                ''', user_id)
 
     async def get_user_predictions(self, user_id: int, market_ids: List[str]) -> Dict[str, bool]:
         """Get user's predictions for given markets"""
@@ -237,7 +251,7 @@ class DatabaseManager:
                        ELSE 0 END as accuracy
                 FROM users u
                 JOIN league_members lm ON u.id = lm.user_id
-                WHERE lm.league_id = $1
+                WHERE lm.league_id = $1 AND u.predictions_made > 0
                 ORDER BY u.total_score DESC, u.predictions_correct DESC
                 LIMIT $2
             ''', league_id, limit)
