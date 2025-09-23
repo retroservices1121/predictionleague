@@ -320,34 +320,119 @@ class KalshiClient:
             return self._get_demo_markets()
 
     def _get_demo_markets(self):
-        """Return demo markets for testing"""
+        """Return 12 demo markets for testing"""
         current_week = datetime.now().strftime("%Y-%m-%d")
         return [
+            # Sports Markets (4)
             {
-                'market_id': 'DEMO-SPORTS-001',
-                'kalshi_ticker': 'DEMO-NFL',
+                'market_id': 'SPORTS-001',
+                'kalshi_ticker': 'NFL-KC-TD',
                 'title': 'Will Chiefs score 3+ TDs this Sunday?',
                 'category': 'Sports',
-                'description': 'Kansas City Chiefs total touchdowns',
+                'description': 'Kansas City Chiefs total touchdowns vs Raiders',
                 'close_time': datetime.now() + timedelta(days=3),
                 'week_start': current_week
             },
             {
-                'market_id': 'DEMO-CRYPTO-001', 
-                'kalshi_ticker': 'DEMO-BTC',
-                'title': 'Will Bitcoin close above $45,000 on Friday?',
+                'market_id': 'SPORTS-002',
+                'kalshi_ticker': 'NBA-LAL-WIN',
+                'title': 'Will Lakers win by 5+ points tonight?',
+                'category': 'Sports',
+                'description': 'Lakers vs Warriors point spread',
+                'close_time': datetime.now() + timedelta(hours=8),
+                'week_start': current_week
+            },
+            {
+                'market_id': 'SPORTS-003',
+                'kalshi_ticker': 'MLB-WS-GAME',
+                'title': 'Will World Series Game 4 go to extras?',
+                'category': 'Sports',
+                'description': 'World Series overtime prediction',
+                'close_time': datetime.now() + timedelta(days=2),
+                'week_start': current_week
+            },
+            {
+                'market_id': 'SPORTS-004',
+                'kalshi_ticker': 'NFL-TOTAL-PTS',
+                'title': 'Will Sunday Night Football total exceed 50 points?',
+                'category': 'Sports',
+                'description': 'Combined score over/under prediction',
+                'close_time': datetime.now() + timedelta(days=4),
+                'week_start': current_week
+            },
+            # Crypto Markets (3)
+            {
+                'market_id': 'CRYPTO-001', 
+                'kalshi_ticker': 'BTC-45K',
+                'title': 'Will Bitcoin close above $45,000 Friday?',
                 'category': 'Crypto',
-                'description': 'Bitcoin weekly close price',
+                'description': 'Bitcoin weekly close price target',
                 'close_time': datetime.now() + timedelta(days=5),
                 'week_start': current_week
             },
             {
-                'market_id': 'DEMO-POLITICS-001',
-                'kalshi_ticker': 'DEMO-POLLS',
-                'title': 'Will approval rating be above 45% this week?',
-                'category': 'Politics', 
-                'description': 'Presidential approval rating',
+                'market_id': 'CRYPTO-002',
+                'kalshi_ticker': 'ETH-3K',
+                'title': 'Will Ethereum hit $3,000 this week?',
+                'category': 'Crypto',
+                'description': 'Ethereum price milestone',
                 'close_time': datetime.now() + timedelta(days=6),
+                'week_start': current_week
+            },
+            {
+                'market_id': 'CRYPTO-003',
+                'kalshi_ticker': 'SOL-100',
+                'title': 'Will Solana reach $100 by Friday?',
+                'category': 'Crypto',
+                'description': 'Solana price target prediction',
+                'close_time': datetime.now() + timedelta(days=5),
+                'week_start': current_week
+            },
+            # Politics Markets (3)
+            {
+                'market_id': 'POLITICS-001',
+                'kalshi_ticker': 'APPROVAL-45',
+                'title': 'Will approval rating exceed 45% this week?',
+                'category': 'Politics', 
+                'description': 'Presidential approval rating threshold',
+                'close_time': datetime.now() + timedelta(days=6),
+                'week_start': current_week
+            },
+            {
+                'market_id': 'POLITICS-002',
+                'kalshi_ticker': 'SENATE-VOTE',
+                'title': 'Will Senate vote pass with 60+ votes?',
+                'category': 'Politics',
+                'description': 'Upcoming Senate legislation',
+                'close_time': datetime.now() + timedelta(days=3),
+                'week_start': current_week
+            },
+            {
+                'market_id': 'POLITICS-003',
+                'kalshi_ticker': 'POLLS-LEAD',
+                'title': 'Will polling lead exceed 5 points?',
+                'category': 'Politics',
+                'description': 'Generic ballot polling margin',
+                'close_time': datetime.now() + timedelta(days=7),
+                'week_start': current_week
+            },
+            # Finance Markets (2)
+            {
+                'market_id': 'FINANCE-001',
+                'kalshi_ticker': 'SPY-ATH',
+                'title': 'Will S&P 500 hit all-time high this week?',
+                'category': 'Finance',
+                'description': 'Stock market milestone prediction',
+                'close_time': datetime.now() + timedelta(days=5),
+                'week_start': current_week
+            },
+            {
+                'market_id': 'FINANCE-002',
+                'kalshi_ticker': 'FED-RATE',
+                'title': 'Will Fed announce rate cut this month?',
+                'category': 'Finance',
+                'description': 'Federal Reserve monetary policy',
+                'close_time': datetime.now() + timedelta(days=14),
                 'week_start': current_week
             }
         ]
@@ -410,44 +495,103 @@ class FantasyLeagueBot:
         await update.message.reply_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
 
     async def markets_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /markets command"""
+        """Handle /markets command - show all 12 markets for selection"""
         user_id = update.effective_user.id
         
-        # Get current week's markets
-        current_week = datetime.now().strftime("%Y-%m-%d")
-        markets = await self.kalshi.get_markets()
-        
-        if not markets:
-            await update.message.reply_text("📊 No markets available this week. Check back soon!")
+        # Get user's leagues first
+        user_leagues = await self.db.get_user_leagues(user_id)
+        if not user_leagues:
+            await update.message.reply_text(
+                "⚠️ You need to join a league first!\n\n"
+                "Use `/createleague [name]` to start your own league\n"
+                "or `/joinleague [id]` to join an existing one."
+            )
             return
         
-        message = f"📊 **This Week's Prediction Markets** 📊\n\n"
+        # Get current week's markets
+        markets = await self.kalshi.get_markets()
         
-        # Group markets by category
-        categories = {}
+        if len(markets) < 12:
+            await update.message.reply_text("📊 Not enough markets available this week. Check back soon!")
+            return
+        
+        # Check if user already made selections this week
+        current_week = datetime.now().strftime("%Y-%m-%d")
+        league_id = user_leagues[0]['league_id']  # Use first league
+        
+        existing_predictions = await self.get_user_weekly_predictions(user_id, league_id, current_week)
+        
+        if len(existing_predictions) >= 7:
+            await update.message.reply_text(
+                f"✅ **Your Predictions Are Set!**\n\n"
+                f"You've already made your 7 predictions for this week.\n"
+                f"Check back next week for new markets!\n\n"
+                f"Use `/leaderboard` to see how you're doing."
+            )
+            return
+        
+        message = f"📊 **This Week's 12 Prediction Markets** 📊\n\n"
+        message += f"🎯 **Select exactly 7 markets to compete**\n"
+        message += f"League: {user_leagues[0]['name']}\n\n"
+        
+        # Show markets by category with numbering
+        categories = {'Sports': [], 'Crypto': [], 'Politics': [], 'Finance': []}
         for market in markets:
             cat = market.get('category', 'Other')
-            if cat not in categories:
-                categories[cat] = []
-            categories[cat].append(market)
+            if cat in categories:
+                categories[cat].append(market)
         
-        # Create buttons for each market
-        keyboard = []
+        market_num = 1
         for category, cat_markets in categories.items():
-            keyboard.append([InlineKeyboardButton(f"📂 {category}", callback_data=f"cat_{category}")])
-            for market in cat_markets[:2]:  # Show first 2 per category
-                title = market['title'][:40] + "..." if len(market['title']) > 40 else market['title']
-                keyboard.append([
-                    InlineKeyboardButton(f"👍 YES", callback_data=f"predict_yes_{market['market_id']}"),
-                    InlineKeyboardButton(f"👎 NO", callback_data=f"predict_no_{market['market_id']}"),
-                ])
-                message += f"🎯 **{market['title']}**\n"
-                message += f"📂 {market['category']} | ⏰ Closes: {market['close_time'].strftime('%m/%d %H:%M')}\n\n"
+            if cat_markets:
+                message += f"**{category}:**\n"
+                for market in cat_markets:
+                    close_time = market['close_time'].strftime('%m/%d %H:%M')
+                    message += f"`{market_num}.` {market['title']}\n"
+                    message += f"    ⏰ Closes: {close_time}\n\n"
+                    market_num += 1
         
-        keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="markets")])
+        # Create selection keyboard - show first 6 markets
+        keyboard = []
+        for i, market in enumerate(markets[:6]):
+            title = market['title'][:30] + "..." if len(market['title']) > 30 else market['title']
+            keyboard.append([
+                InlineKeyboardButton(f"✅ Select #{i+1}", callback_data=f"select_{market['market_id']}")
+            ])
+        
+        # Add "Show More" button for markets 7-12
+        keyboard.append([InlineKeyboardButton("➡️ Show Markets 7-12", callback_data="show_more_markets")])
+        keyboard.append([InlineKeyboardButton("📋 Review Selections", callback_data="review_selections")])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+    async def get_user_weekly_predictions(self, user_id: int, league_id: str, week_start: str):
+        """Get user's predictions for the current week"""
+        async with self.db.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT market_id, prediction FROM predictions 
+                WHERE user_id = $1 AND league_id = $2 
+                AND created_at >= $3::date
+                AND created_at < $3::date + INTERVAL '7 days'
+            """, user_id, league_id, week_start)
+
+    async def save_prediction_selection(self, user_id: int, market_id: str, league_id: str):
+        """Save a market selection (not prediction yet)"""
+        # Store in a temporary selections table or session data
+        # For now, we'll use a simple in-memory storage
+        if not hasattr(self, 'temp_selections'):
+            self.temp_selections = {}
+        
+        user_key = f"{user_id}_{league_id}"
+        if user_key not in self.temp_selections:
+            self.temp_selections[user_key] = []
+        
+        if market_id not in self.temp_selections[user_key]:
+            self.temp_selections[user_key].append(market_id)
+        
+        return len(self.temp_selections[user_key])
 
     async def leaderboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /leaderboard command"""
@@ -617,17 +761,54 @@ class FantasyLeagueBot:
             await self.leaderboard_command(update, context)
         elif data == "mystats":
             await self.mystats_command(update, context)
+        elif data.startswith("select_"):
+            # Handle market selection for weekly picks
+            market_id = data.split("select_")[1]
+            
+            # Get user's league
+            user_leagues = await self.db.get_user_leagues(user_id)
+            if not user_leagues:
+                await query.edit_message_text("❌ You need to join a league first!")
+                return
+            
+            league_id = user_leagues[0]['league_id']
+            selections_count = await self.save_prediction_selection(user_id, market_id, league_id)
+            
+            if selections_count >= 7:
+                # User has selected 7 markets, now show prediction interface
+                await self.show_prediction_interface(query, user_id, league_id)
+            else:
+                # Update the message to show selection progress
+                await query.edit_message_text(
+                    f"✅ **Market Selected!** ({selections_count}/7)\n\n"
+                    f"Keep selecting markets until you have 7 total.\n"
+                    f"Use `/markets` to continue selecting.",
+                    parse_mode='Markdown'
+                )
+        
+        elif data == "show_more_markets":
+            # Show markets 7-12
+            await self.show_more_markets(query, user_id)
+        
+        elif data == "review_selections":
+            # Show current selections and allow prediction setting
+            await self.review_selections(query, user_id)
+        
         elif data.startswith("predict_"):
-            # Handle prediction
+            # Handle final YES/NO predictions
             parts = data.split("_")
             prediction = parts[1] == "yes"
             market_id = "_".join(parts[2:])
             
-            # For now, use default league - in production, let user choose
-            default_league = "global"
+            user_leagues = await self.db.get_user_leagues(user_id)
+            if not user_leagues:
+                await query.edit_message_text("❌ You need to join a league first!")
+                return
+            
+            league_id = user_leagues[0]['league_id']
             
             try:
-                await self.db.make_prediction(user_id, market_id, default_league, prediction)
+                await self.db.make_prediction(user_id, market_id, league_id, prediction)
                 
                 pred_text = "👍 YES" if prediction else "👎 NO"
                 await query.edit_message_text(
@@ -640,6 +821,109 @@ class FantasyLeagueBot:
             except Exception as e:
                 logger.error(f"Error making prediction: {e}")
                 await query.edit_message_text("❌ Error recording prediction. Please try again.")
+
+    async def show_more_markets(self, query, user_id: int):
+        """Show markets 7-12"""
+        markets = await self.kalshi.get_markets()
+        
+        message = "📊 **Markets 7-12** 📊\n\n"
+        
+        for i, market in enumerate(markets[6:12], 7):
+            close_time = market['close_time'].strftime('%m/%d %H:%M')
+            message += f"`{i}.` {market['title']}\n"
+            message += f"    ⏰ Closes: {close_time}\n\n"
+        
+        # Create selection keyboard for markets 7-12
+        keyboard = []
+        for i, market in enumerate(markets[6:12], 7):
+            title = market['title'][:30] + "..." if len(market['title']) > 30 else market['title']
+            keyboard.append([
+                InlineKeyboardButton(f"✅ Select #{i}", callback_data=f"select_{market['market_id']}")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Markets 1-6", callback_data="markets")])
+        keyboard.append([InlineKeyboardButton("📋 Review Selections", callback_data="review_selections")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+    async def review_selections(self, query, user_id: int):
+        """Show current selections and allow setting predictions"""
+        user_leagues = await self.db.get_user_leagues(user_id)
+        if not user_leagues:
+            await query.edit_message_text("❌ You need to join a league first!")
+            return
+        
+        league_id = user_leagues[0]['league_id']
+        user_key = f"{user_id}_{league_id}"
+        
+        if not hasattr(self, 'temp_selections') or user_key not in self.temp_selections:
+            await query.edit_message_text(
+                "📋 **No Markets Selected Yet**\n\n"
+                "Use `/markets` to select your 7 markets for this week.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        selections = self.temp_selections[user_key]
+        markets = await self.kalshi.get_markets()
+        market_dict = {m['market_id']: m for m in markets}
+        
+        message = f"📋 **Your Selected Markets** ({len(selections)}/7)\n\n"
+        
+        for i, market_id in enumerate(selections, 1):
+            if market_id in market_dict:
+                market = market_dict[market_id]
+                message += f"`{i}.` {market['title']}\n"
+        
+        if len(selections) < 7:
+            message += f"\n⚠️ You need {7 - len(selections)} more selections."
+            keyboard = [[InlineKeyboardButton("📊 Continue Selecting", callback_data="markets")]]
+        else:
+            message += "\n✅ **Ready to make predictions!**\n"
+            message += "Click below to set your YES/NO predictions:"
+            keyboard = [[InlineKeyboardButton("🎯 Set Predictions", callback_data="set_predictions")]]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+    async def show_prediction_interface(self, query, user_id: int, league_id: str):
+        """Show interface to set YES/NO predictions on selected markets"""
+        user_key = f"{user_id}_{league_id}"
+        selections = self.temp_selections.get(user_key, [])
+        
+        if len(selections) != 7:
+            await query.edit_message_text("❌ You must select exactly 7 markets first!")
+            return
+        
+        markets = await self.kalshi.get_markets()
+        market_dict = {m['market_id']: m for m in markets}
+        
+        # Show first market for prediction
+        market_id = selections[0]
+        market = market_dict.get(market_id)
+        
+        if not market:
+            await query.edit_message_text("❌ Error loading market. Please try again.")
+            return
+        
+        message = (
+            f"🎯 **Set Your Predictions** (1/7)\n\n"
+            f"**{market['title']}**\n\n"
+            f"📂 {market['category']}\n"
+            f"⏰ Closes: {market['close_time'].strftime('%m/%d %H:%M')}\n\n"
+            f"What's your prediction?"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("👍 YES", callback_data=f"predict_yes_{market_id}"),
+                InlineKeyboardButton("👎 NO", callback_data=f"predict_no_{market_id}")
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors"""
