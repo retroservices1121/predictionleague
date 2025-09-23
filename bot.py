@@ -353,99 +353,99 @@ class KalshiAPI:
         if self.session:
             await self.session.close()
 
-def _create_signature(self, timestamp: str, method: str, path: str, body: str = "") -> str:
-    """Create RSA signature for Kalshi API"""
-    try:
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-        
-        # Parse the private key - handle both formats
-        if self.private_key.startswith('-----BEGIN'):
-            key_data = self.private_key.encode('utf-8')
-        else:
-            # Add PEM wrapper if missing
-            key_data = f"-----BEGIN RSA PRIVATE KEY-----\n{self.private_key}\n-----END RSA PRIVATE KEY-----".encode('utf-8')
-        
-        private_key = serialization.load_pem_private_key(key_data, password=None)
-        
-        # Create message to sign - this is the exact format Kalshi expects
-        msg_string = f"{timestamp}{method}{path}{body}"
-        message = msg_string.encode('utf-8')
-        
-        # Sign the message using RSA with SHA-256 and PKCS1v15 padding
-        signature = private_key.sign(
-            message,
-            padding.PKCS1v15(),
-            hashes.SHA256()
-        )
-        
-        # Return base64 encoded signature
-        return base64.b64encode(signature).decode('utf-8')
-        
-    except Exception as e:
-        logger.error(f"Signature creation failed: {e}")
-        logger.error(f"Key starts with: {self.private_key[:50]}...")
-        return ""
-
-async def login(self) -> bool:
-    """Login to Kalshi API with enhanced debugging"""
-    if not self.api_key or not self.private_key:
-        logger.error("Missing API key or private key")
-        return False
-        
-    try:
-        timestamp = str(int(datetime.now().timestamp() * 1000))
-        path = "/login"
-        method = "POST"
-        body = ""  # Empty body for login
-        
-        logger.info(f"Attempting Kalshi login with API key: {self.api_key[:8]}...")
-        logger.info(f"Timestamp: {timestamp}")
-        logger.info(f"Path: {path}")
-        logger.info(f"Method: {method}")
-        
-        signature = self._create_signature(timestamp, method, path, body)
-        if not signature:
-            logger.error("Failed to create signature")
-            return False
-
-        logger.info(f"Signature created successfully: {signature[:20]}...")
-
-        headers = {
-            'KALSHI-ACCESS-KEY': self.api_key,
-            'KALSHI-ACCESS-SIGNATURE': signature,
-            'KALSHI-ACCESS-TIMESTAMP': timestamp,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-        
-        logger.info(f"Request headers: {list(headers.keys())}")
-
-        async with self.session.post(f"{self.base_url}{path}", headers=headers, json={}) as response:
-            response_text = await response.text()
-            logger.info(f"Response status: {response.status}")
-            logger.info(f"Response headers: {dict(response.headers)}")
-            logger.info(f"Response body: {response_text[:200]}...")
+    def _create_signature(self, timestamp: str, method: str, path: str, body: str = "") -> str:
+        """Create RSA signature for Kalshi API"""
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
             
-            if response.status == 200:
-                data = await response.json()
-                self.token = data.get('token')
-                if self.token:
-                    self.token_expires = datetime.now() + timedelta(hours=1)
-                    logger.info("Successfully logged in to Kalshi")
-                    return True
-                else:
-                    logger.error("No token in response")
-                    return False
+            # Parse the private key - handle both formats
+            if self.private_key.startswith('-----BEGIN'):
+                key_data = self.private_key.encode('utf-8')
             else:
-                logger.error(f"Kalshi login failed: {response.status} - {response_text}")
+                # Add PEM wrapper if missing
+                key_data = f"-----BEGIN RSA PRIVATE KEY-----\n{self.private_key}\n-----END RSA PRIVATE KEY-----".encode('utf-8')
+            
+            private_key = serialization.load_pem_private_key(key_data, password=None)
+            
+            # Create message to sign - this is the exact format Kalshi expects
+            msg_string = f"{timestamp}{method}{path}{body}"
+            message = msg_string.encode('utf-8')
+            
+            # Sign the message using RSA with SHA-256 and PKCS1v15 padding
+            signature = private_key.sign(
+                message,
+                padding.PKCS1v15(),
+                hashes.SHA256()
+            )
+            
+            # Return base64 encoded signature
+            return base64.b64encode(signature).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Signature creation failed: {e}")
+            logger.error(f"Key starts with: {self.private_key[:50]}...")
+            return ""
+
+    async def login(self) -> bool:
+        """Login to Kalshi API with enhanced debugging"""
+        if not self.api_key or not self.private_key:
+            logger.error("Missing API key or private key")
+            return False
+            
+        try:
+            timestamp = str(int(datetime.now().timestamp() * 1000))
+            path = "/login"
+            method = "POST"
+            body = ""  # Empty body for login
+            
+            logger.info(f"Attempting Kalshi login with API key: {self.api_key[:8]}...")
+            logger.info(f"Timestamp: {timestamp}")
+            logger.info(f"Path: {path}")
+            logger.info(f"Method: {method}")
+            
+            signature = self._create_signature(timestamp, method, path, body)
+            if not signature:
+                logger.error("Failed to create signature")
                 return False
+
+            logger.info(f"Signature created successfully: {signature[:20]}...")
+
+            headers = {
+                'KALSHI-ACCESS-KEY': self.api_key,
+                'KALSHI-ACCESS-SIGNATURE': signature,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            logger.info(f"Request headers: {list(headers.keys())}")
+
+            async with self.session.post(f"{self.base_url}{path}", headers=headers, json={}) as response:
+                response_text = await response.text()
+                logger.info(f"Response status: {response.status}")
+                logger.info(f"Response headers: {dict(response.headers)}")
+                logger.info(f"Response body: {response_text[:200]}...")
                 
-    except Exception as e:
-        logger.error(f"Kalshi login error: {e}")
-        import traceback
-        logger.error(f"Full traceback: {traceback.format_exc()}")
-        return False
+                if response.status == 200:
+                    data = await response.json()
+                    self.token = data.get('token')
+                    if self.token:
+                        self.token_expires = datetime.now() + timedelta(hours=1)
+                        logger.info("Successfully logged in to Kalshi")
+                        return True
+                    else:
+                        logger.error("No token in response")
+                        return False
+                else:
+                    logger.error(f"Kalshi login failed: {response.status} - {response_text}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Kalshi login error: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            return False
 
     async def get_markets(self, limit: int = 20) -> List[Dict]:
         """Get active markets from Kalshi"""
