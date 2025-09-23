@@ -579,9 +579,9 @@ Good luck! 🍀"""
                     reply_markup=reply_markup, 
                     parse_mode=ParseMode.MARKDOWN
                 )
-            
+                
         except Exception as e:
-            logger.error(f"Error in markets_command: {e}")
+            logger.error(f"Error in mystats_command: {e}")
             error_msg = "❌ Error loading your stats. Please try again."
             
             if hasattr(update, 'callback_query') and update.callback_query:
@@ -825,7 +825,14 @@ def main():
         logger.error(f"Bot crashed: {e}")
 
 if __name__ == "__main__":
-    main() "❌ Error loading markets. Please try again."
+    main() 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in markets_command: {e}")
+            error_msg = "❌ Error loading markets. Please try again."
             
             if hasattr(update, 'callback_query') and update.callback_query:
                 await update.callback_query.edit_message_text(error_msg)
@@ -962,11 +969,4 @@ if __name__ == "__main__":
                 )
             else:
                 await update.message.reply_text(
-                    message, 
-                    reply_markup=reply_markup, 
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-        except Exception as e:
-            logger.error(f"Error in mystats_command: {e}")
-            error_msg =
+                    message,
