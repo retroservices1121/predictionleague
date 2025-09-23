@@ -1044,7 +1044,7 @@ Good luck with your predictions! 🍀"""
             await query.edit_message_text(
                 message, 
                 reply_markup=reply_markup, 
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWNasync def run(self)
             )
             
         except Exception as e:
@@ -1055,6 +1055,66 @@ Good luck with your predictions! 🍀"""
 
     
 async def run(self):
+        """Run the bot with proper initialization"""
+        try:
+            logger.info("Starting Fantasy League Bot initialization...")
+            
+            # Connect to database first
+            await self.db.connect()
+            logger.info("✅ Database connected and tables created")
+            
+            # Set bot commands for Telegram UI
+            commands = [
+                BotCommand("start", "🎯 Welcome & main menu"),
+                BotCommand("markets", "📊 View prediction markets"),
+                BotCommand("leaderboard", "🏆 See top players"),
+                BotCommand("mystats", "📈 Your statistics"),
+                BotCommand("help", "❓ Help & instructions"),
+                BotCommand("status", "🔍 System status")
+            ]
+            await self.application.bot.set_my_commands(commands)
+            logger.info("✅ Bot commands set")
+            
+            # Initialize weekly markets if none exist
+            today = date.today()
+            week_start = today - timedelta(days=today.weekday())
+            existing_markets = await self.db.get_weekly_markets(week_start)
+            
+            if not existing_markets:
+                logger.info("No markets found, initializing with fresh markets...")
+                success = await self.fetch_and_store_weekly_markets()
+                if success:
+                    logger.info("✅ Weekly markets initialized")
+                else:
+                    logger.warning("⚠️ Could not initialize markets, but bot will continue")
+            else:
+                logger.info(f"✅ Found {len(existing_markets)} existing markets for this week")
+            
+            # Test Kalshi connection if credentials provided
+            if self.kalshi_available:
+                try:
+                    async with KalshiAPI(self.kalshi_api_key, self.kalshi_private_key) as kalshi:
+                        if await kalshi.login():
+                            logger.info("✅ Kalshi API connection successful")
+                        else:
+                            logger.warning("⚠️ Kalshi API login failed, using demo mode")
+                            self.kalshi_available = False
+                except Exception as e:
+                    logger.warning(f"⚠️ Kalshi API error: {e}, using demo mode")
+                    self.kalshi_available = False
+            else:
+                logger.info("⚠️ No Kalshi credentials provided, running in demo mode")
+            
+            # Start the bot using the simpler method
+            logger.info("🚀 Starting Fantasy League Bot polling...")
+            await self.application.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=['message', 'callback_query']
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Critical error starting bot: {e}")
+            raise
 
 async def health_server():
     """Simple health check server for Railway"""
