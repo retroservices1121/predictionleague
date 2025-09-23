@@ -437,6 +437,7 @@ class KalshiAPI:
         except Exception as e:
             logger.error(f"Error getting Kalshi markets: {e}")
             return []
+
 class FantasyLeagueBot:
     def __init__(self, token: str, database_url: str, kalshi_api_key: str = None, kalshi_private_key: str = None):
         self.token = token
@@ -632,7 +633,7 @@ Good luck predicting! 🍀"""
             message = f"📊 **Week of {week_start.strftime('%B %d')} - Prediction Markets**\n\n"
             keyboard = []
             
-            for i, market in enumerate(markets[:6], 1): # Show up to 6 markets
+            for i, market in enumerate(markets[:6], 1):  # Show up to 6 markets
                 title = market['title']
                 if len(title) > 60:
                     title = title[:57] + "..."
@@ -737,7 +738,7 @@ Good luck predicting! 🍀"""
                     predictions = player['predictions_made']
                     
                     message += f"{emoji} **{name}**\n"
-                    message += f" 🎯 {score} pts • {predictions} predictions • {accuracy}% accuracy\n\n"
+                    message += f"    🎯 {score} pts • {predictions} predictions • {accuracy}% accuracy\n\n"
                 
                 # Show user's rank if not in top 10
                 user_in_top = any(p['id'] == user.id for p in leaderboard)
@@ -997,7 +998,7 @@ Good luck with your predictions! 🍀"""
             except:
                 await query.message.reply_text("❌ Error occurred. Please try /start to reset.")
 
-   async def handle_prediction(self, query, data, user):
+    async def handle_prediction(self, query, data, user):
         """Handle prediction button clicks"""
         try:
             # Parse prediction data: predict_yes_MARKET_ID or predict_no_MARKET_ID
@@ -1053,10 +1054,10 @@ Good luck with your predictions! 🍀"""
                 "❌ Error recording prediction. Please try again or contact support."
             )
 
-async def run(self):
-    """Run the bot with proper initialization"""
-    try:
-        logger.info("Starting Fantasy League Bot initialization...")
+    async def run(self):
+        """Run the bot with proper initialization"""
+        try:
+            logger.info("Starting Fantasy League Bot initialization...")
             
             # Connect to database first
             await self.db.connect()
