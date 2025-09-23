@@ -191,51 +191,54 @@ class KalshiBot:
         self.application = None
         
     async def initialize_kalshi(self):
-        """Initialize Kalshi client"""
+        """Initialize Kalshi client with proper API key authentication"""
         try:
             logger.info("Initializing Kalshi client...")
             bot_status["kalshi"] = "connecting"
             
-            # Use the correct kalshi_python API structure
-            from kalshi_python import ApiClient, Configuration, AuthApi
+            # Use the new kalshi_python API structure from PyPI
+            from kalshi_python import Configuration, KalshiClient
             
-            # Create configuration with new API URL
-            config = Configuration()
-            config.host = "https://api.elections.kalshi.com"
+            # Check for required environment variables
+            api_key_id = os.getenv('KALSHI_API_KEY_ID')
+            private_key_pem = os.getenv('KALSHI_PRIVATE_KEY_PEM')
             
-            # Create API client
-            api_client = ApiClient(config)
-            auth_api = AuthApi(api_client)
+            if not api_key_id or not private_key_pem:
+                logger.error("Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PEM environment variables")
+                logger.info("Please set up API key authentication instead of email/password")
+                logger.info("Visit https://kalshi.com/profile/api to generate API credentials")
+                bot_status["kalshi"] = "missing_api_credentials"
+                self.kalshi_client = None
+                return
             
-            # Login to get session token
-            from kalshi_python import LoginRequest
-            login_request = LoginRequest(
-                email=self.kalshi_email,
-                password=self.kalshi_password
+            # Configure the client with new API endpoint and authentication
+            config = Configuration(
+                host="https://api.elections.kalshi.com/trade-api/v2"
             )
+            config.api_key_id = api_key_id
+            config.private_key_pem = private_key_pem
             
-            login_response = auth_api.login(login_request)
+            # Initialize the client
+            self.kalshi_client = KalshiClient(config)
             
-            # Store the authenticated client and APIs
-            self.kalshi_client = {
-                'api_client': api_client,
-                'auth_api': auth_api,
-                'session_token': login_response.token if hasattr(login_response, 'token') else None
-            }
+            # Test the connection by getting balance
+            try:
+                balance = self.kalshi_client.get_balance()
+                logger.info(f"Kalshi client initialized successfully. Balance: ${balance.balance / 100:.2f}")
+                bot_status["kalshi"] = "connected"
+            except Exception as test_error:
+                logger.error(f"Kalshi client created but test call failed: {test_error}")
+                bot_status["kalshi"] = f"auth_failed: {str(test_error)[:50]}"
+                self.kalshi_client = None
             
-            # Import other APIs we'll need
-            from kalshi_python import ExchangeApi, MarketApi, PortfolioApi
-            self.kalshi_client['exchange_api'] = ExchangeApi(api_client)
-            self.kalshi_client['market_api'] = MarketApi(api_client)
-            self.kalshi_client['portfolio_api'] = PortfolioApi(api_client)
-            
-            logger.info("Kalshi client initialized successfully")
-            bot_status["kalshi"] = "connected"
-            
+        except ImportError as e:
+            logger.error(f"Failed to import kalshi_python: {e}")
+            logger.info("Make sure you have the latest kalshi-python package installed")
+            bot_status["kalshi"] = "import_failed"
+            self.kalshi_client = None
         except Exception as e:
             logger.error(f"Failed to initialize Kalshi client: {e}")
             bot_status["kalshi"] = f"failed: {str(e)[:50]}"
-            # Don't raise - let bot work without Kalshi for now
             self.kalshi_client = None
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,43 +295,43 @@ class KalshiBot:
             
             if not self.kalshi_client:
                 await update.message.reply_text(
-                    "⚠️ Kalshi connection not available. Please try again later."
+                    "⚠️ Kalshi connection not available. Please check /status for details."
                 )
                 return
             
-            # Get portfolio from Kalshi
+            # Get portfolio from Kalshi using new API
             portfolio = self.kalshi_client.get_portfolio()
             
-            if not portfolio:
+            if not portfolio or not hasattr(portfolio, 'positions'):
                 await update.message.reply_text("📊 No portfolio data available.")
                 return
             
             # Save to database
+            portfolio_dict = {
+                'positions': [pos.__dict__ if hasattr(pos, '__dict__') else pos for pos in portfolio.positions] if portfolio.positions else [],
+                'balance': portfolio.balance if hasattr(portfolio, 'balance') else 0
+            }
+            
             await self.db.save_user_portfolio(
                 user_id, 
                 update.effective_user.username or "unknown",
-                portfolio
+                portfolio_dict
             )
             
             # Format portfolio information
             message = "📊 **Your Portfolio:**\n\n"
             
-            if 'positions' in portfolio and portfolio['positions']:
+            if portfolio.positions and len(portfolio.positions) > 0:
                 total_value = 0
-                for i, position in enumerate(portfolio['positions'][:10]):  # Show first 10
-                    market_ticker = position.get('market_ticker', 'Unknown')
-                    position_count = position.get('position', 0)
-                    market_value = position.get('market_value', 0)
-                    total_value += market_value
+                for i, position in enumerate(portfolio.positions[:10]):  # Show first 10
+                    market_ticker = getattr(position, 'market_ticker', 'Unknown')
+                    position_count = getattr(position, 'position', 0)
                     
                     message += f"📈 **{market_ticker}**\n"
-                    message += f"   Position: {position_count}\n"
-                    message += f"   Value: ${market_value/100:.2f}\n\n"
+                    message += f"   Position: {position_count}\n\n"
                 
-                message += f"💰 **Total Portfolio Value:** ${total_value/100:.2f}\n"
-                
-                if len(portfolio['positions']) > 10:
-                    message += f"\n... and {len(portfolio['positions']) - 10} more positions"
+                if len(portfolio.positions) > 10:
+                    message += f"... and {len(portfolio.positions) - 10} more positions\n"
             else:
                 message += "No active positions found."
             
@@ -350,14 +353,15 @@ class KalshiBot:
             
             if not self.kalshi_client:
                 await update.message.reply_text(
-                    "⚠️ Kalshi connection not available. Please try again later."
+                    "⚠️ Kalshi connection not available. Please check /status for details."
                 )
                 return
             
-            balance = self.kalshi_client.get_balance()
+            # Get balance from Kalshi using new API
+            balance_response = self.kalshi_client.get_balance()
             
-            if balance:
-                balance_cents = balance.get('balance', 0)
+            if balance_response and hasattr(balance_response, 'balance'):
+                balance_cents = balance_response.balance
                 balance_dollars = balance_cents / 100
                 message = f"💰 **Your Balance:** ${balance_dollars:.2f}"
             else:
