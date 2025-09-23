@@ -1041,23 +1041,22 @@ Good luck with your predictions! 🍀"""
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await query.edit_message_text(
-                message, 
-                reply_markup=reply_markup, 
-                parse_mode=ParseMode.MARKDOWN
-            )
+           await query.edit_message_text(
+            message, 
+            reply_markup=reply_markup, 
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling prediction: {e}")
+        await query.edit_message_text(
+            "❌ Error recording prediction. Please try again or contact support."
+        )
 
-       except Exception as e:
-            logger.error(f"Error handling prediction: {e}")
-            await query.edit_message_text(
-                "❌ Error recording prediction. Please try again or contact support."
-            )
-
-    
 async def run(self):
-        """Run the bot with proper initialization"""
-        try:
-            logger.info("Starting Fantasy League Bot initialization...")
+    """Run the bot with proper initialization"""
+    try:
+        logger.info("Starting Fantasy League Bot initialization...")
             
             # Connect to database first
             await self.db.connect()
