@@ -462,6 +462,9 @@ class FantasyLeagueBot:
             CommandHandler("markets", self.markets_command),
             CommandHandler("leaderboard", self.leaderboard_command),
             CommandHandler("mystats", self.mystats_command),
+            CommandHandler("leagues", self.leagues_command),
+            CommandHandler("create", self.handle_league_creation),
+            CommandHandler("join", self.join_league_command),
             CommandHandler("help", self.help_command),
             CommandHandler("status", self.status_command),
             CallbackQueryHandler(self.button_handler)
@@ -947,6 +950,186 @@ Good luck with your predictions! 🍀"""
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
+async def leagues_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available leagues and league management"""
+    user = update.effective_user
+    
+    if not await self.rate_limit_check(user.id):
+        return
+
+    try:
+        await self.db.get_or_create_user(user.id, user.username, user.first_name)
+        
+        # Get user's current leagues
+        async with self.db.pool.acquire() as conn:
+            user_leagues = await conn.fetch('''
+                SELECT l.id, l.name, l.created_at 
+                FROM leagues l
+                JOIN league_members lm ON l.id = lm.league_id
+                WHERE lm.user_id = $1
+                ORDER BY l.name
+            ''', user.id)
+            
+            # Get all available leagues
+            all_leagues = await conn.fetch('''
+                SELECT l.id, l.name, COUNT(lm.user_id) as member_count
+                FROM leagues l
+                LEFT JOIN league_members lm ON l.id = lm.league_id
+                WHERE l.is_active = TRUE
+                GROUP BY l.id, l.name
+                ORDER BY l.name
+            ''')
+        
+        message = "🏆 **League Management**\n\n"
+        
+        if user_leagues:
+            message += "**Your Leagues:**\n"
+            for league in user_leagues:
+                message += f"• {league['name']}\n"
+            message += "\n"
+        
+        message += "**Available Leagues:**\n"
+        keyboard = []
+        
+        for league in all_leagues[:10]:  # Show max 10 leagues
+            member_count = league['member_count'] or 0
+            is_member = any(ul['id'] == league['id'] for ul in user_leagues)
+            status = "✅ Joined" if is_member else f"👥 {member_count} members"
+            
+            message += f"• **{league['name']}** - {status}\n"
+            
+            if not is_member:
+                keyboard.append([
+                    InlineKeyboardButton(f"Join {league['name']}", callback_data=f"join_league_{league['id']}")
+                ])
+        
+        # Add management buttons
+        keyboard.extend([
+            [InlineKeyboardButton("🆕 Create League", callback_data="create_league")],
+            [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
+            [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(
+                message, 
+                reply_markup=reply_markup, 
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                message, 
+                reply_markup=reply_markup, 
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in leagues_command: {e}")
+        error_msg = "❌ Error loading leagues. Please try again."
+        
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(error_msg)
+        else:
+            await update.message.reply_text(error_msg)
+
+async def handle_league_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle league creation workflow"""
+    user = update.effective_user
+    
+    if context.args:
+        league_name = ' '.join(context.args)
+        
+        try:
+            async with self.db.pool.acquire() as conn:
+                # Check if league name already exists
+                existing = await conn.fetchrow('SELECT id FROM leagues WHERE name = $1', league_name)
+                if existing:
+                    await update.message.reply_text(f"❌ League '{league_name}' already exists!")
+                    return
+                
+                # Create new league
+                league_id = await conn.fetchval('''
+                    INSERT INTO leagues (name) VALUES ($1) RETURNING id
+                ''', league_name)
+                
+                # Add creator to the league
+                await conn.execute('''
+                    INSERT INTO league_members (league_id, user_id) VALUES ($1, $2)
+                ''', league_id, user.id)
+            
+            await update.message.reply_text(
+                f"🎉 **League Created!**\n\n"
+                f"League '{league_name}' has been created and you've been added as the first member!\n\n"
+                f"Share the league name with friends so they can join using:\n"
+                f"`/join {league_name}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Error creating league: {e}")
+            await update.message.reply_text("❌ Error creating league. Please try again.")
+    else:
+        await update.message.reply_text(
+            "Please specify a league name:\n"
+            "`/create My League Name`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def join_league_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle joining a league by name"""
+    user = update.effective_user
+    
+    if not context.args:
+        await update.message.reply_text(
+            "Please specify a league name to join:\n"
+            "`/join League Name`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    league_name = ' '.join(context.args)
+    
+    try:
+        async with self.db.pool.acquire() as conn:
+            # Find the league
+            league = await conn.fetchrow('SELECT id, name FROM leagues WHERE name ILIKE $1', league_name)
+            if not league:
+                await update.message.reply_text(f"❌ League '{league_name}' not found!")
+                return
+            
+            # Check if already a member
+            existing = await conn.fetchrow('''
+                SELECT * FROM league_members WHERE league_id = $1 AND user_id = $2
+            ''', league['id'], user.id)
+            
+            if existing:
+                await update.message.reply_text(f"You're already a member of '{league['name']}'!")
+                return
+            
+            # Add user to league
+            await conn.execute('''
+                INSERT INTO league_members (league_id, user_id) VALUES ($1, $2)
+            ''', league['id'], user.id)
+            
+            # Get member count
+            member_count = await conn.fetchval('''
+                SELECT COUNT(*) FROM league_members WHERE league_id = $1
+            ''', league['id'])
+        
+        await update.message.reply_text(
+            f"🎉 **Joined League!**\n\n"
+            f"You've successfully joined '{league['name']}'!\n"
+            f"Total members: {member_count}\n\n"
+            f"Start making predictions with /markets",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error joining league: {e}")
+        await update.message.reply_text("❌ Error joining league. Please try again.")
+    
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle all inline button presses"""
         query = update.callback_query
@@ -988,6 +1171,36 @@ Good luck with your predictions! 🍀"""
             elif data.startswith("predict_"):
                 await self.handle_prediction(query, data, user)
                 
+            elif data.startswith("join_league_"):
+                league_id = int(data.split("_")[2])
+    try:
+        async with self.db.pool.acquire() as conn:
+            league = await conn.fetchrow('SELECT name FROM leagues WHERE id = $1', league_id)
+            if league:
+                await conn.execute('''
+                    INSERT INTO league_members (league_id, user_id) VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                ''', league_id, user.id)
+                await query.edit_message_text(f"✅ Joined '{league['name']}'!")
+            else:
+                await query.edit_message_text("❌ League not found.")
+    except Exception as e:
+        await query.edit_message_text("❌ Error joining league.")
+
+elif data == "create_league":
+    await query.edit_message_text(
+        "To create a league, use:\n`/create Your League Name`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+elif data == "leagues":
+    fake_update = type('obj', (object,), {
+        'callback_query': query,
+        'effective_user': user,
+        'message': query.message
+    })
+    await self.leagues_command(fake_update, context)
+            
             else:
                 await query.edit_message_text("❌ Unknown command. Please try again.")
                 
@@ -1128,6 +1341,9 @@ async def main_async():
             BotCommand("markets", "📊 View prediction markets"),
             BotCommand("leaderboard", "🏆 See top players"),
             BotCommand("mystats", "📈 Your statistics"),
+            BotCommand("leagues", "🏆 Manage leagues"),
+            BotCommand("create", "🆕 Create a new league"),
+            BotCommand("join", "➕ Join a league"),
             BotCommand("help", "❓ Help & instructions"),
             BotCommand("status", "🔍 System status")
         ]
