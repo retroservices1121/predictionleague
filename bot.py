@@ -1164,13 +1164,31 @@ async def main_async():
         else:
             logger.info("⚠️ No Kalshi credentials provided, running in demo mode")
         
-        # Start the bot using the simpler method
+        # Initialize and start the application manually
         logger.info("🚀 Starting Fantasy League Bot polling...")
-        await bot.application.run_polling(
+        
+        # Initialize the application
+        await bot.application.initialize()
+        await bot.application.start()
+        
+        # Start the updater
+        await bot.application.updater.start_polling(
             drop_pending_updates=True,
             allowed_updates=['message', 'callback_query']
         )
         
+        # Keep running
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Received stop signal")
+        finally:
+            # Clean shutdown
+            await bot.application.updater.stop()
+            await bot.application.stop()
+            await bot.application.shutdown()
+            
     except Exception as e:
         logger.error(f"❌ Critical error starting bot: {e}")
         raise
