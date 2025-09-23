@@ -196,17 +196,48 @@ class KalshiBot:
             logger.info("Initializing Kalshi client...")
             bot_status["kalshi"] = "connecting"
             
-            # Try different import patterns for kalshi-python
-            try:
-                from kalshi_python.kalshi_client import KalshiClient
-            except ImportError:
-                try:
-                    from kalshi_python import kalshi_client
-                    KalshiClient = kalshi_client.KalshiClient
-                except ImportError:
-                    import kalshi_python
-                    KalshiClient = kalshi_python.KalshiClient
+            # Debug: Check what's available in kalshi_python
+            import kalshi_python
+            logger.info(f"kalshi_python attributes: {dir(kalshi_python)}")
             
+            # Try different import patterns
+            KalshiClient = None
+            
+            # Method 1: Direct import
+            try:
+                from kalshi_python import KalshiClient
+                logger.info("Method 1: Direct import successful")
+            except ImportError as e1:
+                logger.info(f"Method 1 failed: {e1}")
+                
+                # Method 2: From submodule
+                try:
+                    from kalshi_python.kalshi_client import KalshiClient
+                    logger.info("Method 2: Submodule import successful")
+                except ImportError as e2:
+                    logger.info(f"Method 2 failed: {e2}")
+                    
+                    # Method 3: Check for different class names
+                    try:
+                        if hasattr(kalshi_python, 'Client'):
+                            KalshiClient = kalshi_python.Client
+                            logger.info("Method 3: Found Client class")
+                        elif hasattr(kalshi_python, 'client'):
+                            KalshiClient = kalshi_python.client
+                            logger.info("Method 3: Found client class")
+                        elif hasattr(kalshi_python, 'Kalshi'):
+                            KalshiClient = kalshi_python.Kalshi
+                            logger.info("Method 3: Found Kalshi class")
+                        else:
+                            raise ImportError("No suitable client class found")
+                    except Exception as e3:
+                        logger.error(f"Method 3 failed: {e3}")
+                        raise ImportError(f"All import methods failed: {e1}, {e2}, {e3}")
+            
+            if not KalshiClient:
+                raise ImportError("Could not find KalshiClient class")
+            
+            # Try to initialize the client
             self.kalshi_client = KalshiClient(
                 email=self.kalshi_email,
                 password=self.kalshi_password,
@@ -214,6 +245,7 @@ class KalshiBot:
             )
             logger.info("Kalshi client initialized successfully")
             bot_status["kalshi"] = "connected"
+            
         except Exception as e:
             logger.error(f"Failed to initialize Kalshi client: {e}")
             bot_status["kalshi"] = f"failed: {str(e)[:50]}"
