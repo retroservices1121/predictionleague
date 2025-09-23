@@ -65,19 +65,83 @@ async def try_bot_components():
         # Test database connection
         logger.info("Testing database connection...")
         import asyncpg
+        import socket
+        from urllib.parse import urlparse
         
         try:
-            conn = await asyncpg.connect(
-                os.getenv('DATABASE_URL'),
-                ssl='require',
-                command_timeout=30
-            )
-            await conn.fetchval('SELECT 1')
-            await conn.close()
-            logger.info("Database connection successful")
-            app_status["database"] = "connected"
+            db_url = os.getenv('DATABASE_URL')
+            logger.info(f"Database URL format: {db_url[:20]}...{db_url[-20:]}")
+            
+            # Parse the URL to test individual components
+            parsed = urlparse(db_url)
+            host = parsed.hostname
+            port = parsed.port or 5432
+            
+            logger.info(f"Attempting to connect to {host}:{port}")
+            
+            # Test DNS resolution
+            try:
+                ip = socket.gethostbyname(host)
+                logger.info(f"DNS resolution successful: {host} -> {ip}")
+            except Exception as dns_error:
+                logger.error(f"DNS resolution failed: {dns_error}")
+                app_status["database"] = f"dns_failed: {dns_error}"
+                return
+            
+            # Test socket connection
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(10)
+                result = sock.connect_ex((host, port))
+                sock.close()
+                
+                if result == 0:
+                    logger.info("Socket connection successful")
+                else:
+                    logger.error(f"Socket connection failed with code: {result}")
+                    app_status["database"] = f"socket_failed: {result}"
+                    return
+            except Exception as socket_error:
+                logger.error(f"Socket test failed: {socket_error}")
+                app_status["database"] = f"socket_error: {socket_error}"
+                return
+            
+            # Test PostgreSQL connection with different SSL modes
+            ssl_modes = ['require', 'prefer', 'disable']
+            
+            for ssl_mode in ssl_modes:
+                try:
+                    logger.info(f"Trying PostgreSQL connection with SSL mode: {ssl_mode}")
+                    
+                    if ssl_mode == 'disable':
+                        # Try without SSL
+                        conn = await asyncpg.connect(
+                            db_url.replace('?sslmode=require', ''),
+                            command_timeout=15
+                        )
+                    else:
+                        conn = await asyncpg.connect(
+                            db_url,
+                            ssl=ssl_mode,
+                            command_timeout=15
+                        )
+                    
+                    result = await conn.fetchval('SELECT 1')
+                    await conn.close()
+                    
+                    logger.info(f"Database connection successful with SSL mode: {ssl_mode}")
+                    app_status["database"] = f"connected_ssl_{ssl_mode}"
+                    return
+                    
+                except Exception as pg_error:
+                    logger.error(f"PostgreSQL connection failed with {ssl_mode}: {pg_error}")
+                    continue
+            
+            # If all SSL modes failed
+            app_status["database"] = "all_ssl_modes_failed"
+            
         except Exception as db_error:
-            logger.error(f"Database connection failed: {db_error}")
+            logger.error(f"Database connection test failed: {db_error}")
             app_status["database"] = f"failed: {str(db_error)[:100]}"
         
         # Test Kalshi client
