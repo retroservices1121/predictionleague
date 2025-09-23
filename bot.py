@@ -178,17 +178,24 @@ class KalshiBot:
     def __init__(self):
         # Environment variables
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.kalshi_email = os.getenv('KALSHI_EMAIL')
-        self.kalshi_password = os.getenv('KALSHI_PASSWORD')
         self.database_url = os.getenv('DATABASE_URL')
         
-        if not all([self.bot_token, self.kalshi_email, self.kalshi_password, self.database_url]):
-            raise ValueError("Missing required environment variables")
+        # New Kalshi API credentials (optional - bot can work without them)
+        self.kalshi_api_key_id = os.getenv('KALSHI_API_KEY_ID')
+        self.kalshi_private_key_pem = os.getenv('KALSHI_PRIVATE_KEY_PEM')
+        
+        # Check required variables (only Telegram and Database are mandatory)
+        if not all([self.bot_token, self.database_url]):
+            missing = []
+            if not self.bot_token:
+                missing.append('TELEGRAM_BOT_TOKEN')
+            if not self.database_url:
+                missing.append('DATABASE_URL')
+            raise ValueError(f"Missing required environment variables: {missing}")
         
         # Initialize components
         self.db = DatabaseManager(self.database_url)
         self.kalshi_client = None
-        self.application = None
         
     async def initialize_kalshi(self):
         """Initialize Kalshi client with proper API key authentication"""
@@ -200,8 +207,8 @@ class KalshiBot:
             from kalshi_python import Configuration, KalshiClient
             
             # Check for required environment variables
-            api_key_id = os.getenv('KALSHI_API_KEY_ID')
-            private_key_pem = os.getenv('KALSHI_PRIVATE_KEY_PEM')
+            api_key_id = self.kalshi_api_key_id
+            private_key_pem = self.kalshi_private_key_pem
             
             if not api_key_id or not private_key_pem:
                 logger.error("Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PEM environment variables")
