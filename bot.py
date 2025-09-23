@@ -354,7 +354,7 @@ class KalshiAPI:
             await self.session.close()
 
     def _create_signature(self, timestamp: str, method: str, path: str, body: str = "") -> str:
-    """Create RSA signature for Kalshi API"""
+        """Create RSA signature for Kalshi API"""
     try:
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
