@@ -1053,67 +1053,8 @@ Good luck with your predictions! 🍀"""
                 "❌ Error recording prediction. Please try again or contact support."
             )
 
-    async def run(self):
-        """Run the bot with proper initialization"""
-        try:
-            logger.info("Starting Fantasy League Bot initialization...")
-            
-            # Connect to database first
-            await self.db.connect()
-            logger.info("✅ Database connected and tables created")
-            
-            # Set bot commands for Telegram UI
-            commands = [
-                BotCommand("start", "🎯 Welcome & main menu"),
-                BotCommand("markets", "📊 View prediction markets"),
-                BotCommand("leaderboard", "🏆 See top players"),
-                BotCommand("mystats", "📈 Your statistics"),
-                BotCommand("help", "❓ Help & instructions"),
-                BotCommand("status", "🔍 System status")
-            ]
-            await self.application.bot.set_my_commands(commands)
-            logger.info("✅ Bot commands set")
-            
-            # Initialize weekly markets if none exist
-            today = date.today()
-            week_start = today - timedelta(days=today.weekday())
-            existing_markets = await self.db.get_weekly_markets(week_start)
-            
-            if not existing_markets:
-                logger.info("No markets found, initializing with fresh markets...")
-                success = await self.fetch_and_store_weekly_markets()
-                if success:
-                    logger.info("✅ Weekly markets initialized")
-                else:
-                    logger.warning("⚠️ Could not initialize markets, but bot will continue")
-            else:
-                logger.info(f"✅ Found {len(existing_markets)} existing markets for this week")
-            
-            # Test Kalshi connection if credentials provided
-            if self.kalshi_available:
-                try:
-                    async with KalshiAPI(self.kalshi_api_key, self.kalshi_private_key) as kalshi:
-                        if await kalshi.login():
-                            logger.info("✅ Kalshi API connection successful")
-                        else:
-                            logger.warning("⚠️ Kalshi API login failed, using demo mode")
-                            self.kalshi_available = False
-                except Exception as e:
-                    logger.warning(f"⚠️ Kalshi API error: {e}, using demo mode")
-                    self.kalshi_available = False
-            else:
-                logger.info("⚠️ No Kalshi credentials provided, running in demo mode")
-            
-            # Start the bot
-            logger.info("🚀 Starting Fantasy League Bot polling...")
-            await self.application.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=['message', 'callback_query']
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Critical error starting bot: {e}")
-            raise
+    
+async def run(self):
 
 async def health_server():
     """Simple health check server for Railway"""
@@ -1135,8 +1076,8 @@ async def health_server():
     
     logger.info(f"✅ Health server started on port {port}")
 
-def main():
-    """Main entry point"""
+async def main_async():
+    """Async main function"""
     logger.info("🎯 Fantasy League Bot starting up...")
     
     # Get environment variables
@@ -1161,20 +1102,18 @@ def main():
     else:
         logger.info("⚠️ No Kalshi credentials - will run in demo mode")
     
-    # Create bot instance
+    # Start health server for Railway
+    await health_server()
+    logger.info("✅ Health server running")
+    
+    # Create and run bot
     bot = FantasyLeagueBot(BOT_TOKEN, DATABASE_URL, KALSHI_API_KEY, KALSHI_PRIVATE_KEY)
-    
-    async def run_both():
-        """Run both health server and bot"""
-        # Start health server for Railway
-        await health_server()
-        logger.info("✅ Health server running")
-        
-        # Start the main bot
-        await bot.run()
-    
+    await bot.run()
+
+def main():
+    """Main entry point"""
     try:
-        asyncio.run(run_both())
+        asyncio.run(main_async())
     except KeyboardInterrupt:
         logger.info("👋 Bot stopped by user")
     except Exception as e:
