@@ -271,21 +271,11 @@ class KalshiBot:
         logger.error(f"Exception while handling an update: {context.error}")
 
     def run_web_server(self):
-        """Run FastAPI server for Railway health checks"""
-        port = int(os.getenv('PORT', 8080))
-        logger.info(f"Starting web server on port {port}")
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+        """This method is no longer used - health server starts in main()"""
+        pass
 
     async def run(self):
-        """Main bot runner optimized for Railway"""
-        # Start web server in background thread FIRST
-        web_thread = threading.Thread(target=self.run_web_server, daemon=True)
-        web_thread.start()
-        logger.info("Health check server started")
-        
-        # Give the web server time to start
-        await asyncio.sleep(2)
-        
+        """Main bot runner optimized for Railway"""        
         try:
             # Connect to database with retries
             await self.db.connect()
@@ -310,6 +300,8 @@ class KalshiBot:
             await self.application.initialize()
             await self.application.start()
             
+            bot_status["telegram"] = "connected"
+            
             # Start polling
             logger.info("Starting bot polling...")
             await self.application.updater.start_polling(
@@ -330,8 +322,9 @@ class KalshiBot:
                 
         except Exception as e:
             logger.error(f"Bot startup error: {e}")
-            # Don't re-raise - keep health server running for Railway
-            logger.info("Keeping health server running despite bot error")
+            bot_status["telegram"] = f"failed: {str(e)[:50]}"
+            # Don't re-raise - let health server keep running
+            logger.info("Bot failed but letting health server continue")
             
             # Keep the main thread alive even if bot fails
             while True:
@@ -374,13 +367,47 @@ class KalshiBot:
 async def main():
     """Main entry point"""
     try:
-        bot = KalshiBot()
-        await bot.run()
+        # Start health server first, independent of bot
+        port = int(os.getenv('PORT', 8080))
+        logger.info(f"Starting standalone health server on port {port}")
+        
+        import uvicorn
+        import threading
+        
+        def run_health_server():
+            uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+        
+        # Start health server immediately
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
+        
+        # Give health server time to start
+        await asyncio.sleep(3)
+        logger.info("Health server should be running now")
+        
+        # Now try to start the bot
+        try:
+            bot = KalshiBot()
+            await bot.run()
+        except Exception as bot_error:
+            logger.error(f"Bot failed to start: {bot_error}")
+            bot_status["telegram"] = f"failed: {str(bot_error)[:50]}"
+            
+            # Keep the health server running even if bot fails
+            logger.info("Bot failed, but keeping health server alive for Railway")
+            while True:
+                await asyncio.sleep(60)
+                logger.info("Health server still running, bot failed")
+                
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Application stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        raise
+        logger.error(f"Fatal error in main: {e}")
+        # Still keep health server running
+        logger.info("Fatal error, but keeping health server alive")
+        while True:
+            await asyncio.sleep(60)
+            logger.error("Health server running despite fatal error")
 
 if __name__ == "__main__":
     asyncio.run(main())
