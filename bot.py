@@ -387,7 +387,7 @@ class KalshiAPI:
         logger.error(f"Key starts with: {self.private_key[:50]}...")
         return ""
 
-    async def login(self) -> bool:
+async def login(self) -> bool:
     """Login to Kalshi API with enhanced debugging"""
     if not self.api_key or not self.private_key:
         logger.error("Missing API key or private key")
