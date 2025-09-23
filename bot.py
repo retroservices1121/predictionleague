@@ -1053,8 +1053,8 @@ Good luck with your predictions! 🍀"""
             await query.edit_message_text(
                 "❌ Error recording prediction. Please try again or contact support."
             )
-
-   async def run(self):
+            
+async def run(self):
         """Run the bot with proper initialization (simplified)"""
         # This method is now empty since initialization is handled in main_async()
         # The bot will be started from main_async() using run_polling()
