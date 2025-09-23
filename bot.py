@@ -1054,67 +1054,11 @@ Good luck with your predictions! 🍀"""
                 "❌ Error recording prediction. Please try again or contact support."
             )
 
-    async def run(self):
-        """Run the bot with proper initialization"""
-        try:
-            logger.info("Starting Fantasy League Bot initialization...")
-            
-            # Connect to database first
-            await self.db.connect()
-            logger.info("✅ Database connected and tables created")
-            
-            # Set bot commands for Telegram UI
-            commands = [
-                BotCommand("start", "🎯 Welcome & main menu"),
-                BotCommand("markets", "📊 View prediction markets"),
-                BotCommand("leaderboard", "🏆 See top players"),
-                BotCommand("mystats", "📈 Your statistics"),
-                BotCommand("help", "❓ Help & instructions"),
-                BotCommand("status", "🔍 System status")
-            ]
-            await self.application.bot.set_my_commands(commands)
-            logger.info("✅ Bot commands set")
-            
-            # Initialize weekly markets if none exist
-            today = date.today()
-            week_start = today - timedelta(days=today.weekday())
-            existing_markets = await self.db.get_weekly_markets(week_start)
-            
-            if not existing_markets:
-                logger.info("No markets found, initializing with fresh markets...")
-                success = await self.fetch_and_store_weekly_markets()
-                if success:
-                    logger.info("✅ Weekly markets initialized")
-                else:
-                    logger.warning("⚠️ Could not initialize markets, but bot will continue")
-            else:
-                logger.info(f"✅ Found {len(existing_markets)} existing markets for this week")
-            
-            # Test Kalshi connection if credentials provided
-            if self.kalshi_available:
-                try:
-                    async with KalshiAPI(self.kalshi_api_key, self.kalshi_private_key) as kalshi:
-                        if await kalshi.login():
-                            logger.info("✅ Kalshi API connection successful")
-                        else:
-                            logger.warning("⚠️ Kalshi API login failed, using demo mode")
-                            self.kalshi_available = False
-                except Exception as e:
-                    logger.warning(f"⚠️ Kalshi API error: {e}, using demo mode")
-                    self.kalshi_available = False
-            else:
-                logger.info("⚠️ No Kalshi credentials provided, running in demo mode")
-            
-            # Start the bot using the simpler method
-            logger.info("🚀 Starting Fantasy League Bot polling...")
-            await self.application.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=['message', 'callback_query']
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Critical error starting bot: {e}")
-            raise
+   async def run(self):
+        """Run the bot with proper initialization (simplified)"""
+        # This method is now empty since initialization is handled in main_async()
+        # The bot will be started from main_async() using run_polling()
+        pass
 
 async def health_server():
     """Simple health check server for Railway"""
@@ -1162,13 +1106,74 @@ async def main_async():
     else:
         logger.info("⚠️ No Kalshi credentials - will run in demo mode")
     
-    # Start health server for Railway
-    await health_server()
+    # Start health server for Railway in background
+    import asyncio
+    health_task = asyncio.create_task(health_server())
     logger.info("✅ Health server running")
     
-    # Create and run bot
+    # Create bot instance
     bot = FantasyLeagueBot(BOT_TOKEN, DATABASE_URL, KALSHI_API_KEY, KALSHI_PRIVATE_KEY)
-    await bot.run()
+    
+    # Initialize bot
+    try:
+        logger.info("Starting Fantasy League Bot initialization...")
+        
+        # Connect to database first
+        await bot.db.connect()
+        logger.info("✅ Database connected and tables created")
+        
+        # Set bot commands for Telegram UI
+        commands = [
+            BotCommand("start", "🎯 Welcome & main menu"),
+            BotCommand("markets", "📊 View prediction markets"),
+            BotCommand("leaderboard", "🏆 See top players"),
+            BotCommand("mystats", "📈 Your statistics"),
+            BotCommand("help", "❓ Help & instructions"),
+            BotCommand("status", "🔍 System status")
+        ]
+        await bot.application.bot.set_my_commands(commands)
+        logger.info("✅ Bot commands set")
+        
+        # Initialize weekly markets if none exist
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+        existing_markets = await bot.db.get_weekly_markets(week_start)
+        
+        if not existing_markets:
+            logger.info("No markets found, initializing with fresh markets...")
+            success = await bot.fetch_and_store_weekly_markets()
+            if success:
+                logger.info("✅ Weekly markets initialized")
+            else:
+                logger.warning("⚠️ Could not initialize markets, but bot will continue")
+        else:
+            logger.info(f"✅ Found {len(existing_markets)} existing markets for this week")
+        
+        # Test Kalshi connection if credentials provided
+        if bot.kalshi_available:
+            try:
+                async with KalshiAPI(bot.kalshi_api_key, bot.kalshi_private_key) as kalshi:
+                    if await kalshi.login():
+                        logger.info("✅ Kalshi API connection successful")
+                    else:
+                        logger.warning("⚠️ Kalshi API login failed, using demo mode")
+                        bot.kalshi_available = False
+            except Exception as e:
+                logger.warning(f"⚠️ Kalshi API error: {e}, using demo mode")
+                bot.kalshi_available = False
+        else:
+            logger.info("⚠️ No Kalshi credentials provided, running in demo mode")
+        
+        # Start the bot using the simpler method
+        logger.info("🚀 Starting Fantasy League Bot polling...")
+        await bot.application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=['message', 'callback_query']
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Critical error starting bot: {e}")
+        raise
 
 def main():
     """Main entry point"""
