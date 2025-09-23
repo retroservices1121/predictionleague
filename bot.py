@@ -1173,19 +1173,19 @@ async def join_league_command(self, update: Update, context: ContextTypes.DEFAUL
                 
             elif data.startswith("join_league_"):
                 league_id = int(data.split("_")[2])
-    try:
-        async with self.db.pool.acquire() as conn:
-            league = await conn.fetchrow('SELECT name FROM leagues WHERE id = $1', league_id)
-            if league:
-                await conn.execute('''
-                    INSERT INTO league_members (league_id, user_id) VALUES ($1, $2)
-                    ON CONFLICT DO NOTHING
-                ''', league_id, user.id)
-                await query.edit_message_text(f"✅ Joined '{league['name']}'!")
-            else:
-                await query.edit_message_text("❌ League not found.")
-    except Exception as e:
-        await query.edit_message_text("❌ Error joining league.")
+                try:
+                    async with self.db.pool.acquire() as conn:
+                        league = await conn.fetchrow('SELECT name FROM leagues WHERE id = $1', league_id)
+                        if league:
+                            await conn.execute('''
+                                INSERT INTO league_members (league_id, user_id) VALUES ($1, $2)
+                                ON CONFLICT DO NOTHING
+                            ''', league_id, user.id)
+                            await query.edit_message_text(f"✅ Joined '{league['name']}'!")
+                        else:
+                            await query.edit_message_text("❌ League not found.")
+                except Exception as e:
+                    await query.edit_message_text("❌ Error joining league.")
 
 elif data == "create_league":
     await query.edit_message_text(
