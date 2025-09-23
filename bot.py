@@ -1044,10 +1044,10 @@ Good luck with your predictions! 🍀"""
             await query.edit_message_text(
                 message, 
                 reply_markup=reply_markup, 
-                parse_mode=ParseMode.MARKDOWNasync def run(self)
+                parse_mode=ParseMode.MARKDOWN
             )
-            
-        except Exception as e:
+
+       except Exception as e:
             logger.error(f"Error handling prediction: {e}")
             await query.edit_message_text(
                 "❌ Error recording prediction. Please try again or contact support."
