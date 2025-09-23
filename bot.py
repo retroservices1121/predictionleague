@@ -997,7 +997,7 @@ Good luck with your predictions! 🍀"""
             except:
                 await query.message.reply_text("❌ Error occurred. Please try /start to reset.")
 
-    async def handle_prediction(self, query, data, user):
+   async def handle_prediction(self, query, data, user):
         """Handle prediction button clicks"""
         try:
             # Parse prediction data: predict_yes_MARKET_ID or predict_no_MARKET_ID
@@ -1041,17 +1041,17 @@ Good luck with your predictions! 🍀"""
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-           await query.edit_message_text(
-            message, 
-            reply_markup=reply_markup, 
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-    except Exception as e:
-        logger.error(f"Error handling prediction: {e}")
-        await query.edit_message_text(
-            "❌ Error recording prediction. Please try again or contact support."
-        )
+            await query.edit_message_text(
+                message, 
+                reply_markup=reply_markup, 
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling prediction: {e}")
+            await query.edit_message_text(
+                "❌ Error recording prediction. Please try again or contact support."
+            )
 
 async def run(self):
     """Run the bot with proper initialization"""
