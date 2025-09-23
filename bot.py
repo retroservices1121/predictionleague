@@ -198,51 +198,50 @@ class KalshiBot:
         self.kalshi_client = None
         
     async def initialize_kalshi(self):
-        """Initialize Kalshi client with proper API key authentication"""
+        """Initialize Kalshi client with direct HTTP requests"""
         try:
             logger.info("Initializing Kalshi client...")
             bot_status["kalshi"] = "connecting"
-            
-            # Use the new kalshi_python API structure from PyPI
-            from kalshi_python import Configuration, KalshiClient
             
             # Check for required environment variables
             api_key_id = self.kalshi_api_key_id
             private_key_pem = self.kalshi_private_key_pem
             
             if not api_key_id or not private_key_pem:
-                logger.error("Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PEM environment variables")
-                logger.info("Please set up API key authentication instead of email/password")
+                logger.info("Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PEM environment variables")
                 logger.info("Visit https://kalshi.com/profile/api to generate API credentials")
                 bot_status["kalshi"] = "missing_api_credentials"
                 self.kalshi_client = None
                 return
             
-            # Configure the client with new API endpoint and authentication
-            config = Configuration(
-                host="https://api.elections.kalshi.com/trade-api/v2"
-            )
-            config.api_key_id = api_key_id
-            config.private_key_pem = private_key_pem
+            # Create a simple HTTP-based Kalshi client
+            import httpx
             
-            # Initialize the client
-            self.kalshi_client = KalshiClient(config)
+            self.kalshi_client = {
+                'api_key_id': api_key_id,
+                'private_key_pem': private_key_pem,
+                'base_url': 'https://api.elections.kalshi.com/trade-api/v2',
+                'session': None
+            }
             
-            # Test the connection by getting balance
+            # Test the connection by making a simple API call
             try:
-                balance = self.kalshi_client.get_balance()
-                logger.info(f"Kalshi client initialized successfully. Balance: ${balance.balance / 100:.2f}")
-                bot_status["kalshi"] = "connected"
+                async with httpx.AsyncClient() as client:
+                    # Try to get exchange status (public endpoint)
+                    response = await client.get(f"{self.kalshi_client['base_url']}/exchange/status")
+                    
+                    if response.status_code == 200:
+                        logger.info("Kalshi API endpoint is reachable")
+                        bot_status["kalshi"] = "connected_no_auth"
+                    else:
+                        logger.error(f"Kalshi API returned status {response.status_code}")
+                        bot_status["kalshi"] = f"api_error_{response.status_code}"
+                        
             except Exception as test_error:
-                logger.error(f"Kalshi client created but test call failed: {test_error}")
-                bot_status["kalshi"] = f"auth_failed: {str(test_error)[:50]}"
+                logger.error(f"Kalshi API test failed: {test_error}")
+                bot_status["kalshi"] = f"connection_failed: {str(test_error)[:50]}"
                 self.kalshi_client = None
             
-        except ImportError as e:
-            logger.error(f"Failed to import kalshi_python: {e}")
-            logger.info("Make sure you have the latest kalshi-python package installed")
-            bot_status["kalshi"] = "import_failed"
-            self.kalshi_client = None
         except Exception as e:
             logger.error(f"Failed to initialize Kalshi client: {e}")
             bot_status["kalshi"] = f"failed: {str(e)[:50]}"
