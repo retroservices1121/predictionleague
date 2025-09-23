@@ -1,18 +1,23 @@
-import asyncio
-import logging
 import os
-import threading
-import json
-import hashlib
-import time
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any, List
-from fastapi import FastAPI
-import uvicorn
+import logging
+import asyncio
 import asyncpg
-import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import aiohttp
+import hashlib
+import hmac
+import base64
+import json
+from datetime import datetime, date, timedelta
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, 
+    ContextTypes, MessageHandler, filters
+)
+from telegram.constants import ParseMode
+from telegram.error import TelegramError
 
 # Configure logging
 logging.basicConfig(
@@ -21,731 +26,649 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global status tracking
-bot_status = {
-    "health_server": "starting",
-    "database": "not_connected",
-    "kalshi": "not_connected", 
-    "telegram": "not_connected",
-    "started_at": datetime.now().isoformat()
-}
+@dataclass
+class Market:
+    id: str
+    title: str
+    category: str
+    close_time: datetime
+    volume: float = 0
+    yes_price: float = 0.5
+    no_price: float = 0.5
+    status: str = 'active'
 
-# FastAPI app for Railway health checks
-app = FastAPI()
+class KalshiAPI:
+    def __init__(self, api_key: str, private_key: str, base_url: str = "https://trading-api.kalshi.com/trade-api/v2"):
+        self.api_key = api_key
+        self.private_key = private_key
+        self.base_url = base_url
+        self.session = None
+        self.token = None
+        self.token_expires = None
 
-@app.get("/")
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy", 
-        "service": "prediction_league_bot",
-        "timestamp": datetime.now().isoformat(),
-        "components": bot_status
-    }
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+
+    def _create_signature(self, timestamp: str, method: str, path: str, body: str = "") -> str:
+        """Create RSA signature for Kalshi API"""
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+            
+            # Parse the private key
+            if self.private_key.startswith('-----BEGIN'):
+                key_data = self.private_key.encode()
+            else:
+                # Add PEM wrapper if missing
+                key_data = f"-----BEGIN PRIVATE KEY-----\n{self.private_key}\n-----END PRIVATE KEY-----".encode()
+            
+            private_key = serialization.load_pem_private_key(key_data, password=None)
+            
+            # Create message to sign
+            message = f"{timestamp}{method}{path}{body}".encode()
+            
+            # Sign the message
+            signature = private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+            return base64.b64encode(signature).decode()
+        except Exception as e:
+            logger.error(f"Signature creation failed: {e}")
+            return ""
+
+    async def login(self) -> bool:
+        """Login to Kalshi API"""
+        try:
+            timestamp = str(int(datetime.now().timestamp() * 1000))
+            path = "/login"
+            method = "POST"
+            
+            signature = self._create_signature(timestamp, method, path)
+            if not signature:
+                return False
+
+            headers = {
+                'KALSHI-ACCESS-KEY': self.api_key,
+                'KALSHI-ACCESS-SIGNATURE': signature,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                'Content-Type': 'application/json'
+            }
+
+            async with self.session.post(f"{self.base_url}{path}", headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self.token = data.get('token')
+                    self.token_expires = datetime.now() + timedelta(hours=1)
+                    logger.info("Successfully logged in to Kalshi")
+                    return True
+                else:
+                    logger.error(f"Login failed: {response.status}")
+                    return False
+        except Exception as e:
+            logger.error(f"Login error: {e}")
+            return False
+
+    async def get_markets(self, limit: int = 20) -> List[Dict]:
+        """Get active markets from Kalshi"""
+        try:
+            if not self.token or datetime.now() >= self.token_expires:
+                if not await self.login():
+                    return []
+
+            headers = {'Authorization': f'Bearer {self.token}'}
+            
+            params = {
+                'limit': limit,
+                'status': 'open',
+                'with_nested_markets': 'true'
+            }
+            
+            async with self.session.get(f"{self.base_url}/markets", headers=headers, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('markets', [])
+                else:
+                    logger.error(f"Failed to get markets: {response.status}")
+                    return []
+        except Exception as e:
+            logger.error(f"Error getting markets: {e}")
+            return []
 
 class DatabaseManager:
     def __init__(self, database_url: str):
         self.database_url = database_url
         self.pool = None
-        self.max_retries = 3
-        self.retry_delay = 5
 
     async def connect(self):
-        """Connect to Railway PostgreSQL database"""
-        if not self.database_url:
-            raise ValueError("DATABASE_URL not provided")
-
-        connection_kwargs = {
-            'dsn': self.database_url,
-            'ssl': 'require',
-            'min_size': 1,
-            'max_size': 5,
-            'command_timeout': 60,
-            'server_settings': {
-                'application_name': 'prediction_league_bot',
-            }
-        }
-
-        for attempt in range(self.max_retries):
-            try:
-                logger.info(f"Database connection attempt {attempt + 1}/{self.max_retries}")
-                bot_status["database"] = "connecting"
-                
-                self.pool = await asyncpg.create_pool(**connection_kwargs)
-                
-                # Test connection
-                async with self.pool.acquire() as conn:
-                    await conn.fetchval('SELECT 1')
-                
-                logger.info("Database connected successfully")
-                bot_status["database"] = "connected"
-                await self.create_tables()
-                return
-                
-            except Exception as e:
-                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
-                bot_status["database"] = f"failed: {str(e)[:50]}"
-                
-                if attempt < self.max_retries - 1:
-                    logger.info(f"Retrying in {self.retry_delay} seconds...")
-                    await asyncio.sleep(self.retry_delay)
-                else:
-                    logger.error("Max database connection retries exceeded")
-                    bot_status["database"] = "failed_permanently"
-                    raise
-
-    async def disconnect(self):
-        """Disconnect from database"""
-        if self.pool:
-            await self.pool.close()
-            logger.info("Database disconnected")
+        """Connect to PostgreSQL database"""
+        try:
+            self.pool = await asyncpg.create_pool(self.database_url)
+            await self.create_tables()
+            logger.info("Database connected successfully")
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise
 
     async def create_tables(self):
-        """Create fantasy league database tables"""
-        logger.info("Creating fantasy league database tables...")
+        """Create necessary database tables"""
         async with self.pool.acquire() as conn:
-            # Users table
-            await conn.execute("""
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    display_name TEXT,
-                    total_points INTEGER DEFAULT 0,
-                    weekly_points INTEGER DEFAULT 0,
-                    streak INTEGER DEFAULT 0,
-                    achievements JSONB DEFAULT '[]',
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    last_active TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # Leagues table
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS leagues (
-                    league_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    creator_id BIGINT,
-                    is_private BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    settings JSONB DEFAULT '{}'
-                )
-            """)
-            
-            # League memberships
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS league_memberships (
-                    user_id BIGINT,
-                    league_id TEXT,
-                    joined_at TIMESTAMP DEFAULT NOW(),
-                    PRIMARY KEY (user_id, league_id)
-                )
-            """)
-            
-            # Weekly markets
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS weekly_markets (
-                    market_id TEXT PRIMARY KEY,
-                    kalshi_ticker TEXT,
-                    title TEXT NOT NULL,
-                    category TEXT,
-                    description TEXT,
-                    close_time TIMESTAMP,
-                    resolved BOOLEAN DEFAULT FALSE,
-                    resolution TEXT,
-                    week_start DATE,
+                    id BIGINT PRIMARY KEY,
+                    username VARCHAR(255),
+                    first_name VARCHAR(255),
+                    total_score INTEGER DEFAULT 0,
+                    weekly_score INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
+                );
+            ''')
             
-            # User predictions
-            await conn.execute("""
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS leagues (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) UNIQUE NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS league_members (
+                    league_id INTEGER REFERENCES leagues(id),
+                    user_id BIGINT REFERENCES users(id),
+                    joined_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (league_id, user_id)
+                );
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS markets (
+                    id VARCHAR(255) PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    category VARCHAR(255),
+                    close_time TIMESTAMP,
+                    week_start DATE,
+                    is_resolved BOOLEAN DEFAULT FALSE,
+                    resolution BOOLEAN,
+                    volume DECIMAL DEFAULT 0,
+                    yes_price DECIMAL DEFAULT 0.5,
+                    no_price DECIMAL DEFAULT 0.5,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            ''')
+            
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS predictions (
                     id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    market_id TEXT,
-                    league_id TEXT,
+                    user_id BIGINT REFERENCES users(id),
+                    market_id VARCHAR(255) REFERENCES markets(id),
+                    league_id INTEGER REFERENCES leagues(id),
                     prediction BOOLEAN,
-                    confidence INTEGER DEFAULT 50,
-                    points_earned INTEGER DEFAULT 0,
-                    is_contrarian BOOLEAN DEFAULT FALSE,
-                    is_early_bird BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # Leaderboards
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS leaderboards (
-                    user_id BIGINT,
-                    league_id TEXT,
+                    confidence INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(user_id, market_id, league_id)
+                );
+            ''')
+
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS weekly_scores (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(id),
+                    league_id INTEGER REFERENCES leagues(id),
                     week_start DATE,
-                    points INTEGER DEFAULT 0,
-                    correct_predictions INTEGER DEFAULT 0,
-                    total_predictions INTEGER DEFAULT 0,
-                    streak INTEGER DEFAULT 0,
-                    PRIMARY KEY (user_id, league_id, week_start)
+                    score INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(user_id, league_id, week_start)
+                );
+            ''')
+
+    async def get_or_create_user(self, user_id: int, username: str, first_name: str):
+        """Get or create user in database"""
+        async with self.pool.acquire() as conn:
+            user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+            if not user:
+                await conn.execute(
+                    'INSERT INTO users (id, username, first_name) VALUES ($1, $2, $3)',
+                    user_id, username, first_name
                 )
-            """)
-            
-            logger.info("Fantasy league database tables created successfully")
+                return await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+            return user
 
-    async def create_user(self, user_id: int, username: str, display_name: str):
-        """Create or update a user"""
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO users (user_id, username, display_name, last_active)
-                VALUES ($1, $2, $3, NOW())
-                ON CONFLICT (user_id) 
-                DO UPDATE SET 
-                    username = $2,
-                    display_name = $3,
-                    last_active = NOW()
-            """, user_id, username, display_name)
-
-    async def create_league(self, league_id: str, name: str, creator_id: int, is_private: bool = False):
-        """Create a new league"""
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO leagues (league_id, name, creator_id, is_private)
-                VALUES ($1, $2, $3, $4)
-            """, league_id, name, creator_id, is_private)
-            
-            # Add creator to league
-            await conn.execute("""
-                INSERT INTO league_memberships (user_id, league_id)
-                VALUES ($1, $2)
-            """, creator_id, league_id)
-
-    async def join_league(self, user_id: int, league_id: str):
-        """Join a league"""
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO league_memberships (user_id, league_id)
-                VALUES ($1, $2)
-                ON CONFLICT DO NOTHING
-            """, user_id, league_id)
-
-    async def get_user_leagues(self, user_id: int):
-        """Get leagues a user belongs to"""
-        async with self.pool.acquire() as conn:
-            return await conn.fetch("""
-                SELECT l.league_id, l.name, l.is_private
-                FROM leagues l
-                JOIN league_memberships lm ON l.league_id = lm.league_id
-                WHERE lm.user_id = $1
-            """, user_id)
-
-    async def get_weekly_markets(self, week_start: str):
+    async def get_weekly_markets(self, week_start: date) -> List[Dict]:
         """Get markets for a specific week"""
         async with self.pool.acquire() as conn:
-            return await conn.fetch("""
-                SELECT * FROM weekly_markets 
-                WHERE week_start = $1 
-                ORDER BY category, created_at
-            """, week_start)
+            markets = await conn.fetch(
+                'SELECT * FROM markets WHERE week_start = $1 AND is_resolved = FALSE ORDER BY close_time',
+                week_start
+            )
+            return [dict(market) for market in markets]
 
-    async def make_prediction(self, user_id: int, market_id: str, league_id: str, prediction: bool):
-        """Make a prediction on a market"""
+    async def store_weekly_markets(self, markets: List[Dict], week_start: date):
+        """Store weekly markets in database"""
         async with self.pool.acquire() as conn:
-            # Check if prediction already exists
-            existing = await conn.fetchrow("""
-                SELECT id FROM predictions 
-                WHERE user_id = $1 AND market_id = $2 AND league_id = $3
-            """, user_id, market_id, league_id)
-            
-            if existing:
-                # Update existing prediction
-                await conn.execute("""
-                    UPDATE predictions 
-                    SET prediction = $4, created_at = NOW()
-                    WHERE user_id = $1 AND market_id = $2 AND league_id = $3
-                """, user_id, market_id, league_id, prediction)
-            else:
-                # Create new prediction
-                await conn.execute("""
-                    INSERT INTO predictions (user_id, market_id, league_id, prediction)
-                    VALUES ($1, $2, $3, $4)
-                """, user_id, market_id, league_id, prediction)
+            for market in markets:
+                # Convert string date to proper date object if needed
+                close_time = market.get('close_time')
+                if isinstance(close_time, str):
+                    close_time = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                elif isinstance(close_time, datetime):
+                    pass  # Already a datetime
+                else:
+                    close_time = datetime.now() + timedelta(days=7)  # Default fallback
 
-    async def get_leaderboard(self, league_id: str, limit: int = 10):
-        """Get leaderboard for a league"""
+                await conn.execute('''
+                    INSERT INTO markets (id, title, category, close_time, week_start, volume, yes_price, no_price)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    category = EXCLUDED.category,
+                    close_time = EXCLUDED.close_time,
+                    volume = EXCLUDED.volume,
+                    yes_price = EXCLUDED.yes_price,
+                    no_price = EXCLUDED.no_price
+                ''', 
+                    market['ticker'], 
+                    market['title'],
+                    market.get('category', 'General'),
+                    close_time,
+                    week_start,
+                    market.get('volume', 0),
+                    market.get('yes_bid', 0.5),
+                    market.get('no_bid', 0.5)
+                )
+
+    async def make_prediction(self, user_id: int, market_id: str, league_id: int, prediction: bool):
+        """Record a user's prediction"""
         async with self.pool.acquire() as conn:
-            return await conn.fetch("""
-                SELECT u.display_name, u.total_points, u.weekly_points, u.streak
-                FROM users u
-                JOIN league_memberships lm ON u.user_id = lm.user_id
-                WHERE lm.league_id = $1
-                ORDER BY u.total_points DESC
-                LIMIT $2
-            """, league_id, limit)
+            await conn.execute('''
+                INSERT INTO predictions (user_id, market_id, league_id, prediction)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, market_id, league_id) 
+                DO UPDATE SET prediction = EXCLUDED.prediction, created_at = NOW()
+            ''', user_id, market_id, league_id, prediction)
 
-    async def get_user_stats(self, user_id: int, league_id: str = None):
-        """Get user statistics"""
+    async def get_user_predictions(self, user_id: int, market_ids: List[str]) -> Dict[str, bool]:
+        """Get user's predictions for given markets"""
+        async with self.pool.acquire() as conn:
+            predictions = await conn.fetch(
+                'SELECT market_id, prediction FROM predictions WHERE user_id = $1 AND market_id = ANY($2)',
+                user_id, market_ids
+            )
+            return {pred['market_id']: pred['prediction'] for pred in predictions}
+
+    async def get_leaderboard(self, league_id: int = None) -> List[Dict]:
+        """Get leaderboard for league or global"""
         async with self.pool.acquire() as conn:
             if league_id:
-                return await conn.fetchrow("""
-                    SELECT 
-                        COUNT(*) as total_predictions,
-                        COUNT(*) FILTER (WHERE points_earned > 0) as correct_predictions,
-                        SUM(points_earned) as total_points,
-                        MAX(created_at) as last_prediction
-                    FROM predictions 
-                    WHERE user_id = $1 AND league_id = $2
-                """, user_id, league_id)
+                query = '''
+                    SELECT u.id, u.username, u.first_name, SUM(ws.score) as total_score
+                    FROM users u
+                    JOIN weekly_scores ws ON u.id = ws.user_id
+                    WHERE ws.league_id = $1
+                    GROUP BY u.id, u.username, u.first_name
+                    ORDER BY total_score DESC
+                    LIMIT 10
+                '''
+                results = await conn.fetch(query, league_id)
             else:
-                return await conn.fetchrow("""
-                    SELECT total_points, weekly_points, streak, achievements
-                    FROM users WHERE user_id = $1
-                """, user_id)
-
-class KalshiClient:
-    def __init__(self):
-        self.base_url = "https://api.elections.kalshi.com/trade-api/v2"
-        self.session = None
-        self.api_key_id = os.getenv('KALSHI_API_KEY_ID')
-        self.private_key_pem = os.getenv('KALSHI_PRIVATE_KEY_PEM')
-
-    async def get_markets(self, category: str = None):
-        """Get markets from Kalshi API or return demo markets"""
-        try:
-            if not self.api_key_id or not self.private_key_pem:
-                return self._get_demo_markets()
+                query = '''
+                    SELECT id, username, first_name, total_score
+                    FROM users
+                    ORDER BY total_score DESC
+                    LIMIT 10
+                '''
+                results = await conn.fetch(query)
             
-            # In production, implement proper Kalshi API calls here
-            # For now, return demo markets
-            return self._get_demo_markets()
-            
-        except Exception as e:
-            logger.error(f"Error fetching Kalshi markets: {e}")
-            return self._get_demo_markets()
+            return [dict(row) for row in results]
 
-    def _get_demo_markets(self):
-        """Return 12 demo markets for testing"""
-        current_week = datetime.now().strftime("%Y-%m-%d")
-        return [
-            # Sports Markets (4)
-            {
-                'market_id': 'SPORTS-001',
-                'kalshi_ticker': 'NFL-KC-TD',
-                'title': 'Will Chiefs score 3+ TDs this Sunday?',
-                'category': 'Sports',
-                'description': 'Kansas City Chiefs total touchdowns vs Raiders',
-                'close_time': datetime.now() + timedelta(days=3),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'SPORTS-002',
-                'kalshi_ticker': 'NBA-LAL-WIN',
-                'title': 'Will Lakers win by 5+ points tonight?',
-                'category': 'Sports',
-                'description': 'Lakers vs Warriors point spread',
-                'close_time': datetime.now() + timedelta(hours=8),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'SPORTS-003',
-                'kalshi_ticker': 'MLB-WS-GAME',
-                'title': 'Will World Series Game 4 go to extras?',
-                'category': 'Sports',
-                'description': 'World Series overtime prediction',
-                'close_time': datetime.now() + timedelta(days=2),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'SPORTS-004',
-                'kalshi_ticker': 'NFL-TOTAL-PTS',
-                'title': 'Will Sunday Night Football total exceed 50 points?',
-                'category': 'Sports',
-                'description': 'Combined score over/under prediction',
-                'close_time': datetime.now() + timedelta(days=4),
-                'week_start': current_week
-            },
-            # Crypto Markets (3)
-            {
-                'market_id': 'CRYPTO-001', 
-                'kalshi_ticker': 'BTC-45K',
-                'title': 'Will Bitcoin close above $45,000 Friday?',
-                'category': 'Crypto',
-                'description': 'Bitcoin weekly close price target',
-                'close_time': datetime.now() + timedelta(days=5),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'CRYPTO-002',
-                'kalshi_ticker': 'ETH-3K',
-                'title': 'Will Ethereum hit $3,000 this week?',
-                'category': 'Crypto',
-                'description': 'Ethereum price milestone',
-                'close_time': datetime.now() + timedelta(days=6),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'CRYPTO-003',
-                'kalshi_ticker': 'SOL-100',
-                'title': 'Will Solana reach $100 by Friday?',
-                'category': 'Crypto',
-                'description': 'Solana price target prediction',
-                'close_time': datetime.now() + timedelta(days=5),
-                'week_start': current_week
-            },
-            # Politics Markets (3)
-            {
-                'market_id': 'POLITICS-001',
-                'kalshi_ticker': 'APPROVAL-45',
-                'title': 'Will approval rating exceed 45% this week?',
-                'category': 'Politics', 
-                'description': 'Presidential approval rating threshold',
-                'close_time': datetime.now() + timedelta(days=6),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'POLITICS-002',
-                'kalshi_ticker': 'SENATE-VOTE',
-                'title': 'Will Senate vote pass with 60+ votes?',
-                'category': 'Politics',
-                'description': 'Upcoming Senate legislation',
-                'close_time': datetime.now() + timedelta(days=3),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'POLITICS-003',
-                'kalshi_ticker': 'POLLS-LEAD',
-                'title': 'Will polling lead exceed 5 points?',
-                'category': 'Politics',
-                'description': 'Generic ballot polling margin',
-                'close_time': datetime.now() + timedelta(days=7),
-                'week_start': current_week
-            },
-            # Finance Markets (2)
-            {
-                'market_id': 'FINANCE-001',
-                'kalshi_ticker': 'SPY-ATH',
-                'title': 'Will S&P 500 hit all-time high this week?',
-                'category': 'Finance',
-                'description': 'Stock market milestone prediction',
-                'close_time': datetime.now() + timedelta(days=5),
-                'week_start': current_week
-            },
-            {
-                'market_id': 'FINANCE-002',
-                'kalshi_ticker': 'FED-RATE',
-                'title': 'Will Fed announce rate cut this month?',
-                'category': 'Finance',
-                'description': 'Federal Reserve monetary policy',
-                'close_time': datetime.now() + timedelta(days=14),
-                'week_start': current_week
-            }
-        ]
+    async def get_default_league(self) -> Optional[int]:
+        """Get or create default league"""
+        async with self.pool.acquire() as conn:
+            league = await conn.fetchrow('SELECT id FROM leagues WHERE name = $1', 'Global League')
+            if not league:
+                league_id = await conn.fetchval(
+                    'INSERT INTO leagues (name) VALUES ($1) RETURNING id', 
+                    'Global League'
+                )
+                return league_id
+            return league['id']
 
 class FantasyLeagueBot:
-    def __init__(self):
-        # Environment variables
-        self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.database_url = os.getenv('DATABASE_URL')
+    def __init__(self, token: str, database_url: str, kalshi_api_key: str = None, kalshi_private_key: str = None):
+        self.token = token
+        self.db = DatabaseManager(database_url)
+        self.kalshi_api_key = kalshi_api_key
+        self.kalshi_private_key = kalshi_private_key
+        self.kalshi_available = bool(kalshi_api_key and kalshi_private_key)
         
-        if not all([self.bot_token, self.database_url]):
-            missing = []
-            if not self.bot_token:
-                missing.append('TELEGRAM_BOT_TOKEN')
-            if not self.database_url:
-                missing.append('DATABASE_URL')
-            raise ValueError(f"Missing required environment variables: {missing}")
+        # Rate limiting
+        self.rate_limits = {}
+        self.rate_limit_window = 60  # 1 minute
+        self.rate_limit_max = 10     # 10 requests per minute
+
+        # Build application
+        self.application = Application.builder().token(token).build()
+        self.setup_handlers()
+
+    def setup_handlers(self):
+        """Setup command and callback handlers"""
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("markets", self.markets_command))
+        self.application.add_handler(CommandHandler("leaderboard", self.leaderboard_command))
+        self.application.add_handler(CommandHandler("mystats", self.mystats_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CallbackQueryHandler(self.button_handler))
+
+    async def rate_limit_check(self, user_id: int) -> bool:
+        """Check if user is rate limited"""
+        now = datetime.now().timestamp()
+        if user_id not in self.rate_limits:
+            self.rate_limits[user_id] = []
         
-        # Initialize components
-        self.db = DatabaseManager(self.database_url)
-        self.kalshi = KalshiClient()
-        self.application = None
+        # Clean old requests
+        self.rate_limits[user_id] = [
+            req_time for req_time in self.rate_limits[user_id] 
+            if now - req_time < self.rate_limit_window
+        ]
+        
+        if len(self.rate_limits[user_id]) >= self.rate_limit_max:
+            return False
+        
+        self.rate_limits[user_id].append(now)
+        return True
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
         user = update.effective_user
-        logger.info(f"Start command from user {user.id} ({user.username})")
         
-        # Create user in database
-        await self.db.create_user(
-            user.id, 
-            user.username or "unknown",
-            user.first_name or "Unknown"
-        )
+        if not await self.rate_limit_check(user.id):
+            await update.message.reply_text("⏰ Please wait a moment before trying again.")
+            return
+
+        await self.db.get_or_create_user(user.id, user.username, user.first_name)
         
-        welcome_message = (
-            f"🎯 **Welcome to Prediction League!** 🎯\n\n"
-            f"Hey {user.first_name}! Ready to compete in the ultimate prediction market fantasy game?\n\n"
-            f"**How it works:**\n"
-            f"📊 Pick YES/NO on weekly markets\n"
-            f"🏆 Earn points for correct predictions\n"
-            f"🔥 Build streaks for bonus points\n"
-            f"👥 Compete in leagues with friends\n\n"
-            f"**Get started:**\n"
-            f"• `/markets` - View this week's markets\n"
-            f"• `/createleague [name]` - Start your own league\n"
-            f"• `/joinleague [id]` - Join a friend's league\n"
-            f"• `/leaderboard` - See rankings\n\n"
-            f"Let's make some predictions! 🚀"
-        )
-        
+        message = f"""🎯 **Welcome to Fantasy League Bot!**
+
+Hi {user.first_name}! Ready to test your prediction skills?
+
+🎮 **How it works:**
+• Pick YES/NO on weekly prediction markets
+• Earn points for correct predictions
+• Compete on the leaderboard
+• Win weekly and seasonal championships
+
+🚀 **Get Started:**
+• View this week's markets: /markets
+• Check the leaderboard: /leaderboard
+• See your stats: /mystats
+
+Good luck! 🍀"""
+
         keyboard = [
-            [InlineKeyboardButton("📊 This Week's Markets", callback_data="markets")],
+            [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
             [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
-            [InlineKeyboardButton("📈 My Stats", callback_data="mystats")],
-            [InlineKeyboardButton("❓ Help", callback_data="help")]
+            [InlineKeyboardButton("📈 My Stats", callback_data="mystats")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            message, 
+            reply_markup=reply_markup, 
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    async def fetch_and_store_weekly_markets(self) -> bool:
+        """Fetch markets from Kalshi and store for the week"""
+        try:
+            if not self.kalshi_available:
+                # Store demo markets if Kalshi not available
+                demo_markets = self.get_demo_markets()
+                today = datetime.now().date()
+                week_start = today - timedelta(days=today.weekday())
+                await self.db.store_weekly_markets(demo_markets, week_start)
+                return True
+            
+            async with KalshiAPI(self.kalshi_api_key, self.kalshi_private_key) as kalshi:
+                markets = await kalshi.get_markets(limit=10)
+                
+                if markets:
+                    today = datetime.now().date()
+                    week_start = today - timedelta(days=today.weekday())
+                    await self.db.store_weekly_markets(markets, week_start)
+                    logger.info(f"Stored {len(markets)} markets for week {week_start}")
+                    return True
+                
+        except Exception as e:
+            logger.error(f"Error fetching markets: {e}")
         
-        await update.message.reply_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
+        return False
+
+    def get_demo_markets(self) -> List[Dict]:
+        """Get demo markets when Kalshi API is not available"""
+        base_time = datetime.now()
+        return [
+            {
+                'ticker': 'DEMO_BTC_100K',
+                'title': 'Will Bitcoin reach $100,000 by end of 2024?',
+                'category': 'Crypto',
+                'close_time': base_time + timedelta(days=30),
+                'volume': 15420,
+                'yes_bid': 0.65,
+                'no_bid': 0.35
+            },
+            {
+                'ticker': 'DEMO_ELECTION_2024',
+                'title': 'Will turnout exceed 150M in 2024 US election?',
+                'category': 'Politics',
+                'close_time': base_time + timedelta(days=45),
+                'volume': 8930,
+                'yes_bid': 0.72,
+                'no_bid': 0.28
+            },
+            {
+                'ticker': 'DEMO_STOCKS_SPY',
+                'title': 'Will SPY close above $500 this week?',
+                'category': 'Finance',
+                'close_time': base_time + timedelta(days=5),
+                'volume': 5670,
+                'yes_bid': 0.45,
+                'no_bid': 0.55
+            },
+            {
+                'ticker': 'DEMO_TECH_AI',
+                'title': 'Will any company announce AGI breakthrough in 2024?',
+                'category': 'Technology',
+                'close_time': base_time + timedelta(days=60),
+                'volume': 12100,
+                'yes_bid': 0.38,
+                'no_bid': 0.62
+            },
+            {
+                'ticker': 'DEMO_WEATHER_TEMP',
+                'title': 'Will December 2024 be warmest on record?',
+                'category': 'Climate',
+                'close_time': base_time + timedelta(days=90),
+                'volume': 3450,
+                'yes_bid': 0.41,
+                'no_bid': 0.59
+            }
+        ]
 
     async def markets_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /markets command - show all 12 markets for selection"""
-        user_id = update.effective_user.id
+        """Show weekly markets"""
+        user = update.effective_user
         
-        # Get user's leagues first
-        user_leagues = await self.db.get_user_leagues(user_id)
-        if not user_leagues:
-            await update.message.reply_text(
-                "⚠️ You need to join a league first!\n\n"
-                "Use `/createleague [name]` to start your own league\n"
-                "or `/joinleague [id]` to join an existing one."
-            )
+        if not await self.rate_limit_check(user.id):
             return
-        
-        # Get current week's markets
-        markets = await self.kalshi.get_markets()
-        
-        if len(markets) < 12:
-            await update.message.reply_text("📊 Not enough markets available this week. Check back soon!")
-            return
-        
-        # Check if user already made selections this week
-        current_week = datetime.now().strftime("%Y-%m-%d")
-        league_id = user_leagues[0]['league_id']  # Use first league
-        
-        existing_predictions = await self.get_user_weekly_predictions(user_id, league_id, current_week)
-        
-        if len(existing_predictions) >= 7:
-            await update.message.reply_text(
-                f"✅ **Your Predictions Are Set!**\n\n"
-                f"You've already made your 7 predictions for this week.\n"
-                f"Check back next week for new markets!\n\n"
-                f"Use `/leaderboard` to see how you're doing."
-            )
-            return
-        
-        message = f"📊 **This Week's 12 Prediction Markets** 📊\n\n"
-        message += f"🎯 **Select exactly 7 markets to compete**\n"
-        message += f"League: {user_leagues[0]['name']}\n\n"
-        
-        # Show markets by category with numbering
-        categories = {'Sports': [], 'Crypto': [], 'Politics': [], 'Finance': []}
-        for market in markets:
-            cat = market.get('category', 'Other')
-            if cat in categories:
-                categories[cat].append(market)
-        
-        market_num = 1
-        for category, cat_markets in categories.items():
-            if cat_markets:
-                message += f"**{category}:**\n"
-                for market in cat_markets:
-                    close_time = market['close_time'].strftime('%m/%d %H:%M')
-                    message += f"`{market_num}.` {market['title']}\n"
-                    message += f"    ⏰ Closes: {close_time}\n\n"
-                    market_num += 1
-        
-        # Create selection keyboard - show first 6 markets
-        keyboard = []
-        for i, market in enumerate(markets[:6]):
-            title = market['title'][:30] + "..." if len(market['title']) > 30 else market['title']
-            keyboard.append([
-                InlineKeyboardButton(f"✅ Select #{i+1}", callback_data=f"select_{market['market_id']}")
+
+        try:
+            await self.db.get_or_create_user(user.id, user.username, user.first_name)
+            
+            # Get current week's markets
+            today = datetime.now().date()
+            week_start = today - timedelta(days=today.weekday())
+            
+            markets = await self.db.get_weekly_markets(week_start)
+            
+            if not markets:
+                # Fetch fresh markets
+                await self.fetch_and_store_weekly_markets()
+                markets = await self.db.get_weekly_markets(week_start)
+            
+            if not markets:
+                await update.message.reply_text(
+                    "🔄 **Markets Loading**\n\n"
+                    "We're fetching fresh prediction markets.\n"
+                    "Try again in 30 seconds! ⏰"
+                )
+                return
+            
+            # Get user's predictions
+            market_ids = [m['id'] for m in markets]
+            user_predictions = await self.db.get_user_predictions(user.id, market_ids)
+            
+            message = f"📊 **Week of {week_start.strftime('%B %d')} - Markets**\n\n"
+            keyboard = []
+            
+            for i, market in enumerate(markets[:5], 1):
+                # Status indicator
+                if market['id'] in user_predictions:
+                    prediction_emoji = "✅" if user_predictions[market['id']] else "❌"
+                    status = f" {prediction_emoji}"
+                else:
+                    status = ""
+                
+                # Market details
+                close_time = market['close_time'].strftime('%m/%d %I:%M%p')
+                category = market.get('category', '📈').upper()
+                
+                message += f"**{i}. {market['title'][:55]}{'...' if len(market['title']) > 55 else ''}**\n"
+                message += f"📅 {close_time} | 🏷️ {category}{status}\n\n"
+                
+                # Add prediction buttons if not yet predicted
+                if market['id'] not in user_predictions and market['close_time'] > datetime.now():
+                    keyboard.append([
+                        InlineKeyboardButton(f"✅ YES #{i}", callback_data=f"predict_yes_{market['id']}"),
+                        InlineKeyboardButton(f"❌ NO #{i}", callback_data=f"predict_no_{market['id']}")
+                    ])
+            
+            if not keyboard:
+                message += "ℹ️ *All markets predicted or closed*"
+            
+            keyboard.extend([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="refresh_markets")],
+                [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
+                [InlineKeyboardButton("📈 My Stats", callback_data="mystats")]
             ])
-        
-        # Add "Show More" button for markets 7-12
-        keyboard.append([InlineKeyboardButton("➡️ Show Markets 7-12", callback_data="show_more_markets")])
-        keyboard.append([InlineKeyboardButton("📋 Review Selections", callback_data="review_selections")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.edit_message_text(
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in markets_command: {e}")
+            error_msg = "❌ Error loading your stats. Please try again."
+            
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.edit_message_text(error_msg)
+            else:
+                await update.message.reply_text(error_msg)
 
-    async def get_user_weekly_predictions(self, user_id: int, league_id: str, week_start: str):
-        """Get user's predictions for the current week"""
-        async with self.db.pool.acquire() as conn:
-            return await conn.fetch("""
-                SELECT market_id, prediction FROM predictions 
-                WHERE user_id = $1 AND league_id = $2 
-                AND created_at >= $3::date
-                AND created_at < $3::date + INTERVAL '7 days'
-            """, user_id, league_id, week_start)
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show help message"""
+        message = """🎯 **Fantasy League Bot Help**
 
-    async def save_prediction_selection(self, user_id: int, market_id: str, league_id: str):
-        """Save a market selection (not prediction yet)"""
-        # Store in a temporary selections table or session data
-        # For now, we'll use a simple in-memory storage
-        if not hasattr(self, 'temp_selections'):
-            self.temp_selections = {}
-        
-        user_key = f"{user_id}_{league_id}"
-        if user_key not in self.temp_selections:
-            self.temp_selections[user_key] = []
-        
-        if market_id not in self.temp_selections[user_key]:
-            self.temp_selections[user_key].append(market_id)
-        
-        return len(self.temp_selections[user_key])
+**📚 Commands:**
+/start - Welcome & main menu
+/markets - View this week's prediction markets
+/leaderboard - See top players
+/mystats - Your personal statistics
+/help - Show this help message
+/status - Check bot system status
 
-    async def leaderboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /leaderboard command"""
-        user_id = update.effective_user.id
-        
-        # Get user's leagues
-        user_leagues = await self.db.get_user_leagues(user_id)
-        
-        if not user_leagues:
-            await update.message.reply_text(
-                "🏆 You haven't joined any leagues yet!\n\n"
-                "Use `/createleague [name]` to start your own league\n"
-                "or `/joinleague [id]` to join an existing one."
-            )
-            return
-        
-        # Show leaderboard for first league (or let user choose)
-        league = user_leagues[0]
-        leaderboard = await self.db.get_leaderboard(league['league_id'])
-        
-        message = f"🏆 **{league['name']} Leaderboard** 🏆\n\n"
-        
-        if not leaderboard:
-            message += "No predictions made yet. Be the first!"
-        else:
-            for i, player in enumerate(leaderboard, 1):
-                emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-                streak_emoji = "🔥" if player['streak'] > 3 else ""
-                message += f"{emoji} **{player['display_name']}** {streak_emoji}\n"
-                message += f"   📊 {player['total_points']} pts | 🆕 {player['weekly_points']} this week\n\n"
-        
-        # Create navigation buttons
-        keyboard = []
-        if len(user_leagues) > 1:
-            keyboard.append([InlineKeyboardButton("📋 Switch League", callback_data="switch_league")])
-        keyboard.append([InlineKeyboardButton("📈 My Stats", callback_data="mystats")])
-        keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="leaderboard")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+**🎮 How to Play:**
+1. View weekly markets with /markets
+2. Click YES/NO buttons to make predictions
+3. Earn 10 points for each correct prediction
+4. Compete on the weekly leaderboard
+5. Track your progress with /mystats
 
-    async def mystats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /mystats command"""
-        user_id = update.effective_user.id
-        
-        # Get user stats
-        stats = await self.db.get_user_stats(user_id)
-        
-        if not stats:
-            await update.message.reply_text("📈 No stats yet! Make some predictions to get started.")
-            return
-        
-        # Calculate accuracy
-        total_points = stats.get('total_points', 0)
-        weekly_points = stats.get('weekly_points', 0) 
-        streak = stats.get('streak', 0)
-        achievements = stats.get('achievements', [])
-        
-        message = f"📈 **Your Stats** 📈\n\n"
-        message += f"🎯 **Total Points:** {total_points}\n"
-        message += f"📅 **This Week:** {weekly_points} points\n"
-        message += f"🔥 **Current Streak:** {streak}\n\n"
-        
-        if achievements:
-            message += f"🏅 **Achievements:** {len(achievements)}\n"
-            for achievement in achievements[:3]:  # Show first 3
-                message += f"   • {achievement}\n"
-            if len(achievements) > 3:
-                message += f"   ... and {len(achievements) - 3} more!\n"
-        else:
-            message += f"🏅 **Achievements:** None yet - keep predicting!\n"
-        
+**🏆 Scoring:**
+• Correct prediction: +10 points
+• Incorrect prediction: 0 points
+• Bonus points for difficult predictions (coming soon!)
+
+**💡 Tips:**
+• Markets close at their scheduled time
+• You can only predict once per market
+• Check back weekly for new markets
+• Study the odds before predicting
+
+**🛟 Need Help?**
+Contact @YourBotAdmin for support!
+
+Good luck! 🍀"""
+
         keyboard = [
-            [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
-            [InlineKeyboardButton("📊 Markets", callback_data="markets")],
-            [InlineKeyboardButton("🏅 All Achievements", callback_data="achievements")]
+            [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
+            [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+        await update.message.reply_text(
+            message, 
+            reply_markup=reply_markup, 
+            parse_mode=ParseMode.MARKDOWN
+        )
 
-    async def createleague_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /createleague command"""
-        user_id = update.effective_user.id
-        
-        if not context.args:
-            await update.message.reply_text(
-                "🏆 **Create a League**\n\n"
-                "Usage: `/createleague [name]`\n\n"
-                "Example: `/createleague Friends Fantasy`"
-            )
-            return
-        
-        league_name = " ".join(context.args)
-        league_id = f"league_{hashlib.md5(f'{user_id}_{league_name}_{time.time()}'.encode()).hexdigest()[:8]}"
-        
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show bot status"""
         try:
-            await self.db.create_league(league_id, league_name, user_id, is_private=True)
-            
-            message = (
-                f"🎉 **League Created!** 🎉\n\n"
-                f"**League:** {league_name}\n"
-                f"**ID:** `{league_id}`\n\n"
-                f"Share this ID with friends so they can join:\n"
-                f"`/joinleague {league_id}`\n\n"
-                f"Ready to start making predictions! 🚀"
-            )
-            
-            keyboard = [
-                [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
-                [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-            
-        except Exception as e:
-            logger.error(f"Error creating league: {e}")
-            await update.message.reply_text("❌ Error creating league. Please try again.")
+            # Check database connection
+            async with self.db.pool.acquire() as conn:
+                await conn.fetchval('SELECT 1')
+            db_status = "✅ Connected"
+        except:
+            db_status = "❌ Error"
+        
+        # Check Kalshi API
+        kalshi_status = "✅ Available" if self.kalshi_available else "⚠️ Demo Mode"
+        
+        # Get stats
+        async with self.db.pool.acquire() as conn:
+            total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
+            total_predictions = await conn.fetchval('SELECT COUNT(*) FROM predictions')
+            active_markets = await conn.fetchval('SELECT COUNT(*) FROM markets WHERE is_resolved = FALSE')
+        
+        message = f"""🔍 **Bot Status**
 
-    async def joinleague_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /joinleague command"""
-        user_id = update.effective_user.id
-        
-        if not context.args:
-            await update.message.reply_text(
-                "👥 **Join a League**\n\n"
-                "Usage: `/joinleague [league_id]`\n\n"
-                "Get the league ID from a friend who created the league."
-            )
-            return
-        
-        league_id = context.args[0]
-        
-        try:
-            await self.db.join_league(user_id, league_id)
-            
-            message = (
-                f"🎉 **Joined League!** 🎉\n\n"
-                f"Welcome to the league! Start making predictions to climb the leaderboard.\n\n"
-                f"Ready to compete! 🚀"
-            )
-            
-            keyboard = [
-                [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
-                [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-            
-        except Exception as e:
-            logger.error(f"Error joining league: {e}")
-            await update.message.reply_text("❌ League not found or error joining. Check the league ID.")
+**🗄️ Database:** {db_status}
+**📡 Kalshi API:** {kalshi_status}
+**⚡ Bot:** ✅ Running
+
+**📊 Statistics:**
+• Total Users: {total_users}
+• Active Markets: {active_markets}
+• Total Predictions: {total_predictions}
+
+**🕐 Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"""
+
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button presses"""
@@ -753,288 +676,297 @@ class FantasyLeagueBot:
         await query.answer()
         
         data = query.data
-        user_id = update.effective_user.id
+        user = update.effective_user
         
-        if data == "markets":
-            await self.markets_command(update, context)
-        elif data == "leaderboard":
-            await self.leaderboard_command(update, context)
-        elif data == "mystats":
-            await self.mystats_command(update, context)
-        elif data.startswith("select_"):
-            # Handle market selection for weekly picks
-            market_id = data.split("select_")[1]
-            
-            # Get user's league
-            user_leagues = await self.db.get_user_leagues(user_id)
-            if not user_leagues:
-                await query.edit_message_text("❌ You need to join a league first!")
-                return
-            
-            league_id = user_leagues[0]['league_id']
-            selections_count = await self.save_prediction_selection(user_id, market_id, league_id)
-            
-            if selections_count >= 7:
-                # User has selected 7 markets, now show prediction interface
-                await self.show_prediction_interface(query, user_id, league_id)
-            else:
-                # Update the message to show selection progress
-                await query.edit_message_text(
-                    f"✅ **Market Selected!** ({selections_count}/7)\n\n"
-                    f"Keep selecting markets until you have 7 total.\n"
-                    f"Use `/markets` to continue selecting.",
-                    parse_mode='Markdown'
-                )
+        if not await self.rate_limit_check(user.id):
+            await query.edit_message_text("⏰ Please wait a moment before trying again.")
+            return
         
-        elif data == "show_more_markets":
-            # Show markets 7-12
-            await self.show_more_markets(query, user_id)
-        
-        elif data == "review_selections":
-            # Show current selections and allow prediction setting
-            await self.review_selections(query, user_id)
-        
-        elif data.startswith("predict_"):
-            # Handle final YES/NO predictions
-            parts = data.split("_")
-            prediction = parts[1] == "yes"
-            market_id = "_".join(parts[2:])
-            
-            user_leagues = await self.db.get_user_leagues(user_id)
-            if not user_leagues:
-                await query.edit_message_text("❌ You need to join a league first!")
-                return
-            
-            league_id = user_leagues[0]['league_id']
-            
-            try:
-                await self.db.make_prediction(user_id, market_id, league_id, prediction)
+        try:
+            if data == "markets" or data == "refresh_markets":
+                # Create a fake update object for markets_command
+                fake_update = type('obj', (object,), {
+                    'callback_query': query,
+                    'effective_user': user
+                })
+                await self.markets_command(fake_update, context)
                 
-                pred_text = "👍 YES" if prediction else "👎 NO"
+            elif data == "leaderboard":
+                fake_update = type('obj', (object,), {
+                    'callback_query': query,
+                    'effective_user': user
+                })
+                await self.leaderboard_command(fake_update, context)
+                
+            elif data == "mystats":
+                fake_update = type('obj', (object,), {
+                    'callback_query': query,
+                    'effective_user': user
+                })
+                await self.mystats_command(fake_update, context)
+                
+            elif data.startswith("predict_"):
+                await self.handle_prediction(query, data, user)
+                
+        except Exception as e:
+            logger.error(f"Error in button_handler: {e}")
+            await query.edit_message_text("❌ Something went wrong. Please try again.")
+
+    async def handle_prediction(self, query, data, user):
+        """Handle prediction button clicks"""
+        try:
+            # Parse the prediction data
+            parts = data.split('_')
+            if len(parts) < 3:
+                await query.edit_message_text("❌ Invalid prediction format.")
+                return
+                
+            prediction_type = parts[1]  # 'yes' or 'no'
+            market_id = '_'.join(parts[2:])  # Rejoin in case market_id has underscores
+            
+            prediction = prediction_type == 'yes'
+            
+            # Get default league
+            league_id = await self.db.get_default_league()
+            
+            # Make prediction
+            await self.db.make_prediction(user.id, market_id, league_id, prediction)
+            
+            # Get market details for confirmation
+            async with self.db.pool.acquire() as conn:
+                market = await conn.fetchrow('SELECT * FROM markets WHERE id = $1', market_id)
+            
+            if market:
+                pred_text = "YES ✅" if prediction else "NO ❌"
+                message = f"🎯 **Prediction Recorded!**\n\n"
+                message += f"**Market:** {market['title'][:60]}{'...' if len(market['title']) > 60 else ''}\n\n"
+                message += f"**Your Prediction:** {pred_text}\n"
+                message += f"**Closes:** {market['close_time'].strftime('%B %d, %Y at %I:%M %p')}\n\n"
+                message += "Good luck! 🍀\n\n"
+                message += "_You'll earn 10 points if correct when this market resolves._"
+                
+                keyboard = [
+                    [InlineKeyboardButton("📊 View More Markets", callback_data="markets")],
+                    [InlineKeyboardButton("📈 My Stats", callback_data="mystats")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
                 await query.edit_message_text(
-                    f"✅ **Prediction Recorded!**\n\n"
-                    f"Your pick: {pred_text}\n"
-                    f"Market: {market_id}\n\n"
-                    f"Good luck! 🍀",
-                    parse_mode='Markdown'
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
                 )
-            except Exception as e:
-                logger.error(f"Error making prediction: {e}")
-                await query.edit_message_text("❌ Error recording prediction. Please try again.")
-
-    async def show_more_markets(self, query, user_id: int):
-        """Show markets 7-12"""
-        markets = await self.kalshi.get_markets()
-        
-        message = "📊 **Markets 7-12** 📊\n\n"
-        
-        for i, market in enumerate(markets[6:12], 7):
-            close_time = market['close_time'].strftime('%m/%d %H:%M')
-            message += f"`{i}.` {market['title']}\n"
-            message += f"    ⏰ Closes: {close_time}\n\n"
-        
-        # Create selection keyboard for markets 7-12
-        keyboard = []
-        for i, market in enumerate(markets[6:12], 7):
-            title = market['title'][:30] + "..." if len(market['title']) > 30 else market['title']
-            keyboard.append([
-                InlineKeyboardButton(f"✅ Select #{i}", callback_data=f"select_{market['market_id']}")
-            ])
-        
-        keyboard.append([InlineKeyboardButton("⬅️ Back to Markets 1-6", callback_data="markets")])
-        keyboard.append([InlineKeyboardButton("📋 Review Selections", callback_data="review_selections")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-
-    async def review_selections(self, query, user_id: int):
-        """Show current selections and allow setting predictions"""
-        user_leagues = await self.db.get_user_leagues(user_id)
-        if not user_leagues:
-            await query.edit_message_text("❌ You need to join a league first!")
-            return
-        
-        league_id = user_leagues[0]['league_id']
-        user_key = f"{user_id}_{league_id}"
-        
-        if not hasattr(self, 'temp_selections') or user_key not in self.temp_selections:
-            await query.edit_message_text(
-                "📋 **No Markets Selected Yet**\n\n"
-                "Use `/markets` to select your 7 markets for this week.",
-                parse_mode='Markdown'
-            )
-            return
-        
-        selections = self.temp_selections[user_key]
-        markets = await self.kalshi.get_markets()
-        market_dict = {m['market_id']: m for m in markets}
-        
-        message = f"📋 **Your Selected Markets** ({len(selections)}/7)\n\n"
-        
-        for i, market_id in enumerate(selections, 1):
-            if market_id in market_dict:
-                market = market_dict[market_id]
-                message += f"`{i}.` {market['title']}\n"
-        
-        if len(selections) < 7:
-            message += f"\n⚠️ You need {7 - len(selections)} more selections."
-            keyboard = [[InlineKeyboardButton("📊 Continue Selecting", callback_data="markets")]]
-        else:
-            message += "\n✅ **Ready to make predictions!**\n"
-            message += "Click below to set your YES/NO predictions:"
-            keyboard = [[InlineKeyboardButton("🎯 Set Predictions", callback_data="set_predictions")]]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-
-    async def show_prediction_interface(self, query, user_id: int, league_id: str):
-        """Show interface to set YES/NO predictions on selected markets"""
-        user_key = f"{user_id}_{league_id}"
-        selections = self.temp_selections.get(user_key, [])
-        
-        if len(selections) != 7:
-            await query.edit_message_text("❌ You must select exactly 7 markets first!")
-            return
-        
-        markets = await self.kalshi.get_markets()
-        market_dict = {m['market_id']: m for m in markets}
-        
-        # Show first market for prediction
-        market_id = selections[0]
-        market = market_dict.get(market_id)
-        
-        if not market:
-            await query.edit_message_text("❌ Error loading market. Please try again.")
-            return
-        
-        message = (
-            f"🎯 **Set Your Predictions** (1/7)\n\n"
-            f"**{market['title']}**\n\n"
-            f"📂 {market['category']}\n"
-            f"⏰ Closes: {market['close_time'].strftime('%m/%d %H:%M')}\n\n"
-            f"What's your prediction?"
-        )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("👍 YES", callback_data=f"predict_yes_{market_id}"),
-                InlineKeyboardButton("👎 NO", callback_data=f"predict_no_{market_id}")
-            ]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
-
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
-        """Handle errors"""
-        logger.error(f"Exception while handling an update: {context.error}")
+            else:
+                await query.edit_message_text("❌ Market not found. Please try again.")
+                
+        except Exception as e:
+            logger.error(f"Error in handle_prediction: {e}")
+            await query.edit_message_text("❌ Error recording prediction. Please try again.")
 
     async def run(self):
-        """Main bot runner"""        
+        """Run the bot"""
         try:
             # Connect to database
             await self.db.connect()
-            logger.info("Database connected successfully")
+            logger.info("Database connected")
             
-            # Create Telegram application
-            self.application = Application.builder().token(self.bot_token).build()
+            # Set bot commands
+            commands = [
+                BotCommand("start", "Welcome & main menu"),
+                BotCommand("markets", "View prediction markets"),
+                BotCommand("leaderboard", "See top players"),
+                BotCommand("mystats", "Your statistics"),
+                BotCommand("help", "Show help"),
+                BotCommand("status", "Bot status")
+            ]
+            await self.application.bot.set_my_commands(commands)
             
-            # Add handlers
-            self.application.add_handler(CommandHandler("start", self.start_command))
-            self.application.add_handler(CommandHandler("markets", self.markets_command))
-            self.application.add_handler(CommandHandler("leaderboard", self.leaderboard_command))
-            self.application.add_handler(CommandHandler("mystats", self.mystats_command))
-            self.application.add_handler(CommandHandler("createleague", self.createleague_command))
-            self.application.add_handler(CommandHandler("joinleague", self.joinleague_command))
-            self.application.add_handler(CallbackQueryHandler(self.button_handler))
-            self.application.add_error_handler(self.error_handler)
+            # Initialize with some demo markets if needed
+            today = datetime.now().date()
+            week_start = today - timedelta(days=today.weekday())
+            existing_markets = await self.db.get_weekly_markets(week_start)
             
-            # Initialize and start the application
-            await self.application.initialize()
-            await self.application.start()
+            if not existing_markets:
+                logger.info("No markets found, creating demo markets...")
+                await self.fetch_and_store_weekly_markets()
             
-            bot_status["telegram"] = "connected"
+            # Start the bot
+            logger.info("Starting Fantasy League Bot...")
+            await self.application.run_polling(drop_pending_updates=True)
             
-            # Start polling
-            logger.info("Starting fantasy league bot polling...")
-            await self.application.updater.start_polling(
-                poll_interval=1.0,
-                timeout=20,
-                bootstrap_retries=3,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30
-            )
-            
-            # Keep running
-            logger.info("Fantasy league bot started successfully and is running...")
-            
-            # Keep the main thread alive
-            while True:
-                await asyncio.sleep(1)
-                
         except Exception as e:
-            logger.error(f"Bot startup error: {e}")
-            bot_status["telegram"] = f"failed: {str(e)[:50]}"
+            logger.error(f"Error running bot: {e}")
             raise
-        finally:
-            await self.cleanup()
 
-    async def cleanup(self):
-        """Clean shutdown"""
-        logger.info("Shutting down fantasy league bot...")
-        
-        try:
-            if self.application:
-                if hasattr(self.application, 'updater') and self.application.updater.running:
-                    await self.application.updater.stop()
-                if self.application.running:
-                    await self.application.stop()
-                await self.application.shutdown()
-                    
-            await self.db.disconnect()
-            logger.info("Fantasy league bot shutdown complete")
-            
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-
-def run_health_server():
-    """Run health server for Railway"""
-    try:
-        port = int(os.getenv('PORT', 8080))
-        logger.info(f"Starting health server on port {port}")
-        bot_status["health_server"] = "running"
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
-    except Exception as e:
-        logger.error(f"Health server failed: {e}")
-        bot_status["health_server"] = f"failed: {e}"
-
-async def main():
-    """Main entry point"""
-    logger.info("Starting Fantasy League Bot on Railway...")
+def main():
+    """Main function"""
+    # Get environment variables
+    BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    KALSHI_API_KEY = os.getenv('KALSHI_API_KEY_ID')
+    KALSHI_PRIVATE_KEY = os.getenv('KALSHI_PRIVATE_KEY_PEM')
     
-    # Start health server immediately in background
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
+    if not BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
+        return
     
-    # Give health server time to start
-    await asyncio.sleep(2)
-    logger.info("Health server started, now starting fantasy league bot...")
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL environment variable is required")
+        return
+    
+    # Create and run bot
+    bot = FantasyLeagueBot(BOT_TOKEN, DATABASE_URL, KALSHI_API_KEY, KALSHI_PRIVATE_KEY)
     
     try:
-        bot = FantasyLeagueBot()
-        await bot.run()
+        asyncio.run(bot.run())
     except KeyboardInterrupt:
-        logger.info("Fantasy league bot stopped by user")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        bot_status["telegram"] = f"fatal_error: {str(e)[:50]}"
-        
-        # Keep health server running even if bot fails
-        logger.info("Bot failed, keeping health server alive")
-        while True:
-            await asyncio.sleep(60)
-            logger.error("Bot failed but health server still running")
+        logger.error(f"Bot crashed: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main() "❌ Error loading markets. Please try again."
+            
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.edit_message_text(error_msg)
+            else:
+                await update.message.reply_text(error_msg)
+
+    async def leaderboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show leaderboard"""
+        user = update.effective_user
+        
+        if not await self.rate_limit_check(user.id):
+            return
+
+        try:
+            leaderboard = await self.db.get_leaderboard()
+            
+            message = "🏆 **Global Leaderboard**\n\n"
+            
+            if not leaderboard:
+                message += "No players yet! Be the first to make predictions! 🎯"
+            else:
+                for i, player in enumerate(leaderboard, 1):
+                    emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+                    name = player['first_name'] or player['username'] or f"User {player['id']}"
+                    score = player.get('total_score', 0)
+                    message += f"{emoji} **{name}** - {score} pts\n"
+                
+                # Show user's position if not in top 10
+                user_in_top = any(p['id'] == user.id for p in leaderboard)
+                if not user_in_top:
+                    message += f"\n📍 Your position: Check with /mystats"
+            
+            keyboard = [
+                [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
+                [InlineKeyboardButton("📈 My Stats", callback_data="mystats")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.edit_message_text(
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+        except Exception as e:
+            logger.error(f"Error in leaderboard_command: {e}")
+            error_msg = "❌ Error loading leaderboard. Please try again."
+            
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.edit_message_text(error_msg)
+            else:
+                await update.message.reply_text(error_msg)
+
+    async def mystats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show user's personal statistics"""
+        user = update.effective_user
+        
+        if not await self.rate_limit_check(user.id):
+            return
+
+        try:
+            await self.db.get_or_create_user(user.id, user.username, user.first_name)
+            
+            async with self.db.pool.acquire() as conn:
+                # Get user stats
+                user_data = await conn.fetchrow('SELECT * FROM users WHERE id = $1', user.id)
+                
+                # Get prediction stats
+                total_predictions = await conn.fetchval(
+                    'SELECT COUNT(*) FROM predictions WHERE user_id = $1', user.id
+                )
+                
+                correct_predictions = await conn.fetchval('''
+                    SELECT COUNT(*) FROM predictions p
+                    JOIN markets m ON p.market_id = m.id
+                    WHERE p.user_id = $1 AND m.is_resolved = TRUE 
+                    AND p.prediction = m.resolution
+                ''', user.id)
+                
+                # Calculate accuracy
+                accuracy = (correct_predictions / total_predictions * 100) if total_predictions > 0 else 0
+                
+                message = f"📈 **Your Stats**\n\n"
+                message += f"👤 **Player:** {user.first_name}\n"
+                message += f"🎯 **Total Score:** {user_data['total_score']} pts\n"
+                message += f"📊 **Predictions Made:** {total_predictions}\n"
+                message += f"✅ **Correct:** {correct_predictions}\n"
+                message += f"🎪 **Accuracy:** {accuracy:.1f}%\n"
+                
+                # Get recent predictions
+                recent = await conn.fetch('''
+                    SELECT m.title, p.prediction, m.is_resolved, m.resolution
+                    FROM predictions p
+                    JOIN markets m ON p.market_id = m.id
+                    WHERE p.user_id = $1
+                    ORDER BY p.created_at DESC
+                    LIMIT 5
+                ''', user.id)
+                
+                if recent:
+                    message += "\n**🕐 Recent Predictions:**\n"
+                    for pred in recent:
+                        title = pred['title'][:40] + "..." if len(pred['title']) > 40 else pred['title']
+                        pred_text = "YES" if pred['prediction'] else "NO"
+                        
+                        if pred['is_resolved']:
+                            if pred['prediction'] == pred['resolution']:
+                                status = "✅"
+                            else:
+                                status = "❌"
+                        else:
+                            status = "⏳"
+                        
+                        message += f"• {pred_text} on '{title}' {status}\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("📊 View Markets", callback_data="markets")],
+                [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.edit_message_text(
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    message, 
+                    reply_markup=reply_markup, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+        except Exception as e:
+            logger.error(f"Error in mystats_command: {e}")
+            error_msg =
