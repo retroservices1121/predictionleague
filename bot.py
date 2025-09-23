@@ -199,9 +199,9 @@ class KalshiBot:
             # Use the correct kalshi_python API structure
             from kalshi_python import ApiClient, Configuration, AuthApi
             
-            # Create configuration
+            # Create configuration with new API URL
             config = Configuration()
-            config.host = "https://trading-api.kalshi.com/trade-api/v2"
+            config.host = "https://api.elections.kalshi.com"
             
             # Create API client
             api_client = ApiClient(config)
