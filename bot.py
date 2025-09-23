@@ -38,101 +38,137 @@ class DatabaseManager:
                 max_size=10,
                 command_timeout=60
             )
-            await self.create_tables()
+            await self.ensure_schema()
             logger.info("Database connected successfully")
         except Exception as e:
             logger.error(f"Database connection failed: {e}")
             raise
 
-    async def create_tables(self):
-        """Create necessary database tables in correct order"""
+    async def ensure_schema(self):
+        """Ensure the correct schema exists, handle existing tables"""
         async with self.pool.acquire() as conn:
-            # 1. Users table (no dependencies)
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id BIGINT PRIMARY KEY,
-                    username VARCHAR(255),
-                    first_name VARCHAR(255),
-                    total_score INTEGER DEFAULT 0,
-                    weekly_score INTEGER DEFAULT 0,
-                    predictions_made INTEGER DEFAULT 0,
-                    predictions_correct INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT NOW()
-                );
-            ''')
-            
-            # 2. Leagues table (no dependencies)
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS leagues (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(255) UNIQUE NOT NULL,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT NOW()
-                );
-            ''')
-            
-            # 3. Markets table (no dependencies)
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS markets (
-                    id VARCHAR(255) PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    category VARCHAR(255) DEFAULT 'General',
-                    close_time TIMESTAMP NOT NULL,
-                    week_start DATE NOT NULL,
-                    is_resolved BOOLEAN DEFAULT FALSE,
-                    resolution BOOLEAN,
-                    volume DECIMAL DEFAULT 0,
-                    yes_price DECIMAL DEFAULT 0.5,
-                    no_price DECIMAL DEFAULT 0.5,
-                    created_at TIMESTAMP DEFAULT NOW()
-                );
-            ''')
-            
-            # 4. League members table (depends on users and leagues)
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS league_members (
-                    league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    joined_at TIMESTAMP DEFAULT NOW(),
-                    PRIMARY KEY (league_id, user_id)
-                );
-            ''')
-            
-            # 5. Predictions table (depends on users, markets, leagues)
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS predictions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    market_id VARCHAR(255) REFERENCES markets(id) ON DELETE CASCADE,
-                    league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE DEFAULT 1,
-                    prediction BOOLEAN NOT NULL,
-                    confidence INTEGER DEFAULT 1,
-                    points_earned INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(user_id, market_id, league_id)
-                );
-            ''')
+            try:
+                # Check if we need to drop existing incompatible tables
+                existing_tables = await conn.fetch("""
+                    SELECT tablename FROM pg_tables 
+                    WHERE schemaname = 'public' 
+                    AND tablename IN ('users', 'leagues', 'markets', 'predictions', 'league_members', 'weekly_scores')
+                """)
+                
+                if existing_tables:
+                    logger.info(f"Found existing tables: {[t['tablename'] for t in existing_tables]}")
+                    
+                    # Drop existing tables in reverse dependency order
+                    drop_order = [
+                        'weekly_scores', 'predictions', 'league_members', 
+                        'markets', 'leagues', 'users',
+                        'weekly_mark', 'user_settings', 'user_portfolios', 
+                        'leaderboards', 'bot_logs'
+                    ]
+                    
+                    for table in drop_order:
+                        try:
+                            await conn.execute(f'DROP TABLE IF EXISTS {table} CASCADE')
+                            logger.info(f"Dropped table: {table}")
+                        except Exception as e:
+                            logger.warning(f"Could not drop {table}: {e}")
+                
+                # Now create the fresh schema
+                await self.create_tables(conn)
+                
+            except Exception as e:
+                logger.error(f"Schema migration failed: {e}")
+                # Try creating tables anyway
+                await self.create_tables(conn)
 
-            # 6. Weekly scores table (depends on users and leagues)
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS weekly_scores (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
-                    week_start DATE NOT NULL,
-                    score INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(user_id, league_id, week_start)
-                );
-            ''')
+    async def create_tables(self, conn):
+        """Create necessary database tables in correct order"""
+        # 1. Users table (no dependencies)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGINT PRIMARY KEY,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                total_score INTEGER DEFAULT 0,
+                weekly_score INTEGER DEFAULT 0,
+                predictions_made INTEGER DEFAULT 0,
+                predictions_correct INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        ''')
+        
+        # 2. Leagues table (no dependencies)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS leagues (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) UNIQUE NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        ''')
+        
+        # 3. Markets table (no dependencies)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS markets (
+                id VARCHAR(255) PRIMARY KEY,
+                title TEXT NOT NULL,
+                category VARCHAR(255) DEFAULT 'General',
+                close_time TIMESTAMP NOT NULL,
+                week_start DATE NOT NULL,
+                is_resolved BOOLEAN DEFAULT FALSE,
+                resolution BOOLEAN,
+                volume DECIMAL DEFAULT 0,
+                yes_price DECIMAL DEFAULT 0.5,
+                no_price DECIMAL DEFAULT 0.5,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        ''')
+        
+        # 4. League members table (depends on users and leagues)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS league_members (
+                league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                joined_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (league_id, user_id)
+            );
+        ''')
+        
+        # 5. Predictions table (depends on users, markets, leagues)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS predictions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                market_id VARCHAR(255) REFERENCES markets(id) ON DELETE CASCADE,
+                league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
+                prediction BOOLEAN NOT NULL,
+                confidence INTEGER DEFAULT 1,
+                points_earned INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, market_id, league_id)
+            );
+        ''')
 
-            # 7. Create default league if it doesn't exist
-            await conn.execute('''
-                INSERT INTO leagues (id, name) VALUES (1, 'Global League')
-                ON CONFLICT (id) DO NOTHING;
-            ''')
+        # 6. Weekly scores table (depends on users and leagues)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS weekly_scores (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                league_id INTEGER REFERENCES leagues(id) ON DELETE CASCADE,
+                week_start DATE NOT NULL,
+                score INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, league_id, week_start)
+            );
+        ''')
 
-            logger.info("Database tables created successfully")
+        # 7. Create default league
+        await conn.execute('''
+            INSERT INTO leagues (id, name) VALUES (1, 'Global League')
+            ON CONFLICT (id) DO NOTHING;
+        ''')
+
+        logger.info("Fantasy league database tables created successfully")
 
     async def get_or_create_user(self, user_id: int, username: str, first_name: str):
         """Get or create user in database"""
@@ -250,8 +286,8 @@ class DatabaseManager:
                            ROUND((u.predictions_correct::float / u.predictions_made * 100), 1) 
                        ELSE 0 END as accuracy
                 FROM users u
-                JOIN league_members lm ON u.id = lm.user_id
-                WHERE lm.league_id = $1 AND u.predictions_made > 0
+                LEFT JOIN league_members lm ON u.id = lm.user_id AND lm.league_id = $1
+                WHERE u.predictions_made > 0
                 ORDER BY u.total_score DESC, u.predictions_correct DESC
                 LIMIT $2
             ''', league_id, limit)
