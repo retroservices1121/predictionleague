@@ -83,7 +83,17 @@ async def try_bot_components():
         # Test Kalshi client
         logger.info("Testing Kalshi client...")
         try:
-            from kalshi_python import KalshiClient
+            # Try different import patterns for kalshi-python
+            try:
+                from kalshi_python.kalshi_client import KalshiClient
+            except ImportError:
+                try:
+                    from kalshi_python import kalshi_client
+                    KalshiClient = kalshi_client.KalshiClient
+                except ImportError:
+                    import kalshi_python
+                    KalshiClient = kalshi_python.KalshiClient
+            
             client = KalshiClient(
                 email=os.getenv('KALSHI_EMAIL'),
                 password=os.getenv('KALSHI_PASSWORD'),
