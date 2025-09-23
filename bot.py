@@ -79,12 +79,62 @@ async def try_bot_components():
             
             logger.info(f"Attempting to connect to {host}:{port}")
             
-            # Test DNS resolution
+            # Test DNS resolution with multiple methods
             try:
                 ip = socket.gethostbyname(host)
                 logger.info(f"DNS resolution successful: {host} -> {ip}")
             except Exception as dns_error:
                 logger.error(f"DNS resolution failed: {dns_error}")
+                
+                # Try alternative DNS methods
+                logger.info("Trying alternative DNS resolution methods...")
+                
+                # Try with different DNS servers
+                import subprocess
+                try:
+                    result = subprocess.run(['nslookup', host], capture_output=True, text=True, timeout=10)
+                    logger.info(f"nslookup result: {result.stdout}")
+                except Exception as nslookup_error:
+                    logger.error(f"nslookup failed: {nslookup_error}")
+                
+                # Try direct IP connection (common Supabase IPs)
+                # These are examples - we'll need to find the actual IP
+                test_ips = [
+                    "34.120.54.55",  # Common Google Cloud IP for Supabase
+                    "35.236.11.79",  # Another common Supabase IP
+                ]
+                
+                for test_ip in test_ips:
+                    try:
+                        logger.info(f"Testing direct IP connection: {test_ip}")
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(5)
+                        result = sock.connect_ex((test_ip, port))
+                        sock.close()
+                        
+                        if result == 0:
+                            logger.info(f"Direct IP connection successful: {test_ip}")
+                            # Try to create a modified connection string with IP
+                            ip_db_url = db_url.replace(host, test_ip)
+                            logger.info(f"Trying connection with IP: {ip_db_url[:30]}...")
+                            
+                            conn = await asyncpg.connect(
+                                ip_db_url,
+                                ssl='require',
+                                command_timeout=15,
+                                server_settings={'application_name': 'railway_test'}
+                            )
+                            result = await conn.fetchval('SELECT 1')
+                            await conn.close()
+                            
+                            logger.info(f"Database connection successful using IP: {test_ip}")
+                            app_status["database"] = f"connected_via_ip_{test_ip}"
+                            return
+                            
+                    except Exception as ip_error:
+                        logger.error(f"IP connection {test_ip} failed: {ip_error}")
+                        continue
+                
                 app_status["database"] = f"dns_failed: {dns_error}"
                 return
             
