@@ -898,7 +898,7 @@ Good luck with your predictions! 🍀"""
         )
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show bot system status"""
+        """Show bot system status with detailed Kalshi info"""
         try:
             # Check database connection
             async with self.db.pool.acquire() as conn:
@@ -907,18 +907,38 @@ Good luck with your predictions! 🍀"""
         except Exception as e:
             db_status = f"❌ Error: {str(e)[:50]}"
         
-        # Check Kalshi API status
-        if self.kalshi_available:
+        # Detailed Kalshi API check
+        kalshi_details = []
+        if self.kalshi_api_key and self.kalshi_private_key:
+            kalshi_details.append("🔑 API Key: ✅ Present")
+            kalshi_details.append("🔐 Private Key: ✅ Present")
+            
+            # Test actual connection
             try:
                 async with KalshiAPI(self.kalshi_api_key, self.kalshi_private_key) as kalshi:
-                    if await kalshi.login():
-                        kalshi_status = "✅ Connected"
+                    login_success = await kalshi.login()
+                    if login_success:
+                        kalshi_status = "✅ Connected & Working"
+                        kalshi_details.append("🔗 Login: ✅ Success")
+                        
+                        # Try to fetch markets
+                        markets = await kalshi.get_markets(limit=1)
+                        if markets:
+                            kalshi_details.append(f"📊 Markets: ✅ {len(markets)} available")
+                        else:
+                            kalshi_details.append("📊 Markets: ⚠️ None returned")
                     else:
-                        kalshi_status = "⚠️ Login Failed"
-            except:
-                kalshi_status = "⚠️ Connection Error"
+                        kalshi_status = "❌ Login Failed"
+                        kalshi_details.append("🔗 Login: ❌ Invalid credentials")
+            except Exception as e:
+                kalshi_status = f"❌ Error: {str(e)[:30]}"
+                kalshi_details.append(f"🔗 Error: {str(e)[:50]}")
         else:
-            kalshi_status = "⚠️ Demo Mode (No API Keys)"
+            kalshi_status = "⚠️ Demo Mode (No Credentials)"
+            if not self.kalshi_api_key:
+                kalshi_details.append("🔑 API Key: ❌ Missing")
+            if not self.kalshi_private_key:
+                kalshi_details.append("🔐 Private Key: ❌ Missing")
         
         # Get statistics
         try:
@@ -927,8 +947,9 @@ Good luck with your predictions! 🍀"""
                 total_predictions = await conn.fetchval('SELECT COUNT(*) FROM predictions')
                 active_markets = await conn.fetchval('SELECT COUNT(*) FROM markets WHERE close_time > NOW()')
                 resolved_markets = await conn.fetchval('SELECT COUNT(*) FROM markets WHERE is_resolved = TRUE')
+                total_leagues = await conn.fetchval('SELECT COUNT(*) FROM leagues')
         except:
-            total_users = total_predictions = active_markets = resolved_markets = 0
+            total_users = total_predictions = active_markets = resolved_markets = total_leagues = 0
 
         message = f"""🔍 **Bot System Status**
 
@@ -938,15 +959,24 @@ Good luck with your predictions! 🍀"""
 ⚡ **Bot Service:** ✅ Running
 🤖 **Telegram API:** ✅ Connected
 
+**📡 Kalshi API Details:**
+{chr(10).join(kalshi_details)}
+
 **📊 Current Statistics:**
 👥 **Total Users:** {total_users}
+🏆 **Total Leagues:** {total_leagues}
 🎯 **Active Markets:** {active_markets}
 📋 **Total Predictions:** {total_predictions}
 ✅ **Resolved Markets:** {resolved_markets}
 
 **🕐 Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
 
-**ℹ️ Version:** Fantasy League Bot v1.0"""
+**ℹ️ Version:** Fantasy League Bot v1.0
+
+**💡 Kalshi Setup:**
+To use real markets, add these environment variables:
+• `KALSHI_API_KEY_ID` - Your Kalshi API Key
+• `KALSHI_PRIVATE_KEY_PEM` - Your Kalshi Private Key"""
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
@@ -1186,21 +1216,21 @@ async def join_league_command(self, update: Update, context: ContextTypes.DEFAUL
                             await query.edit_message_text("❌ League not found.")
                 except Exception as e:
                     await query.edit_message_text("❌ Error joining league.")
-
-elif data == "create_league":
-    await query.edit_message_text(
-        "To create a league, use:\n`/create Your League Name`",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-elif data == "leagues":
-    fake_update = type('obj', (object,), {
-        'callback_query': query,
-        'effective_user': user,
-        'message': query.message
-    })
-    await self.leagues_command(fake_update, context)
-            
+                    
+            elif data == "create_league":
+                await query.edit_message_text(
+                    "To create a league, use:\n`/create Your League Name`",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+            elif data == "leagues":
+                fake_update = type('obj', (object,), {
+                    'callback_query': query,
+                    'effective_user': user,
+                    'message': query.message
+                })
+                await self.leagues_command(fake_update, context)
+                
             else:
                 await query.edit_message_text("❌ Unknown command. Please try again.")
                 
@@ -1210,7 +1240,6 @@ elif data == "leagues":
                 await query.edit_message_text("❌ Something went wrong. Please try /start to reset.")
             except:
                 await query.message.reply_text("❌ Error occurred. Please try /start to reset.")
-
     async def handle_prediction(self, query, data, user):
         """Handle prediction button clicks"""
         try:
